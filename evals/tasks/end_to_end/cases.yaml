@@ -1,0 +1,43 @@
+# End-to-end suite: full API pipeline tests
+# Tests the FastAPI server endpoints without external LLM calls.
+# Run with: pytest evals/tasks/end_to_end/ -v
+
+- id: health_check
+  description: Health endpoint returns ok
+  type: e2e
+  method: GET
+  path: /health
+  expected_status: 200
+  expected_body:
+    status: ok
+
+- id: metadata_list_empty
+  description: Metadata list returns empty array on fresh DB
+  type: e2e
+  method: GET
+  path: /metadata
+  expected_status: 200
+  expected_body_type: list
+
+- id: sessions_list_empty
+  description: Sessions list returns empty array on fresh DB
+  type: e2e
+  method: GET
+  path: /sessions
+  expected_status: 200
+  expected_body_type: list
+
+- id: confirm_nonexistent_session
+  description: Confirming a nonexistent session returns 404
+  type: e2e
+  method: POST
+  path: /metadata/nonexistent-session-id/confirm
+  expected_status: 404
+
+- id: metadata_filter_by_status
+  description: Metadata list with status filter returns empty on fresh DB
+  type: e2e
+  method: GET
+  path: /metadata?status=draft
+  expected_status: 200
+  expected_body_type: list

@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-white text-sand-900 antialiased;
+  }
+}
+
+@layer components {
+  .chat-bubble-user {
+    @apply bg-sand-100 text-sand-800 rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%] ml-auto;
+  }
+  .chat-bubble-agent {
+    @apply text-sand-800 max-w-[80%];
+  }
+}
+
+/* Auto-hiding scrollbar — visible only while scrolling */
+.chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.chat-scroll:hover {
+  scrollbar-color: #D4D1C7 transparent;
+}
+.chat-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+.chat-scroll:hover::-webkit-scrollbar-thumb {
+  background: #D4D1C7;
+}
+
+/* SSE streaming text cursor */
+.streaming-cursor::after {
+  content: '\25CF';
+  animation: blink 1s step-end infinite;
+  color: #D97757;
+  font-size: 0.5em;
+  vertical-align: middle;
+  margin-left: 2px;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* Markdown tables in chat */
+.chat-bubble-agent table {
+  @apply w-full text-xs border-collapse my-2;
+}
+.chat-bubble-agent th {
+  @apply bg-sand-50 text-left font-semibold px-3 py-1.5 border border-sand-200;
+}
+.chat-bubble-agent td {
+  @apply px-3 py-1.5 border border-sand-200;
+}
+.chat-bubble-agent tr:nth-child(even) {
+  @apply bg-sand-50;
+}
+
+/* Metadata card hover */
+.metadata-card {
+  @apply transition-all duration-200;
+}
+.metadata-card:hover {
+  @apply shadow-sm -translate-y-0.5;
+}

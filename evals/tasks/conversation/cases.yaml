@@ -1,0 +1,74 @@
+# Conversation suite: LLM-graded chat quality tests
+# These tests use the Anthropic API for grading, so require ANTHROPIC_API_KEY.
+# Run with: pytest evals/tasks/conversation/ -v -m llm
+
+- id: basic_metadata_capture
+  description: Agent correctly captures subject and modality from a straightforward user message
+  type: conversation
+  transcript: |
+    USER: I have a two-photon calcium imaging session from mouse 748392. The mouse is female.
+    ASSISTANT: I've recorded the following metadata for your session:
+    - Subject ID: 748392
+    - Species: Mus musculus (mouse)
+    - Sex: Female
+    - Modality: Planar optical physiology (two-photon calcium imaging)
+
+    Would you like to add any additional details such as the project name, rig ID, or session times?
+  rubric:
+    accuracy: "Did the agent correctly identify the subject ID (748392), species (mouse), sex (female), and modality (two-photon/pophys)?"
+    completeness: "Did the agent capture all metadata fields mentioned by the user?"
+    helpfulness: "Did the agent proactively ask about additional relevant fields?"
+
+- id: multi_turn_progressive
+  description: Agent builds metadata incrementally across multiple turns
+  type: conversation
+  transcript: |
+    USER: Starting a new ecephys experiment. Project is called Visual Behavior.
+    ASSISTANT: Got it! I've started a new metadata record with:
+    - Modality: Extracellular electrophysiology (ecephys)
+    - Project name: Visual Behavior
+
+    What subject or specimen are you working with today?
+
+    USER: Mouse 650001, male. Rig is MESO.2
+    ASSISTANT: Updated the metadata:
+    - Subject ID: 650001
+    - Species: Mus musculus
+    - Sex: Male
+    - Rig ID: MESO.2
+
+    The record is looking good. Do you have session start/end times or any protocol information to add?
+  rubric:
+    accuracy: "Did the agent correctly capture project name (Visual Behavior), modality (ecephys), subject ID (650001), sex (Male), and rig ID (MESO.2)?"
+    incremental_capture: "Did the agent build the metadata progressively across turns rather than losing earlier information?"
+    naturalness: "Was the conversation flow natural and did the agent ask relevant follow-up questions?"
+
+- id: ambiguous_modality
+  description: Agent handles an ambiguous modality description gracefully
+  type: conversation
+  transcript: |
+    USER: I did some imaging today on mouse 123456.
+    ASSISTANT: I've noted that you have an imaging session with mouse 123456. Could you tell me more about the type of imaging? For example, was this two-photon calcium imaging, confocal microscopy, light-sheet (SmartSPIM), or another modality? This will help me categorize the session correctly.
+  rubric:
+    disambiguation: "Did the agent recognize the ambiguity in 'imaging' and ask for clarification about the specific modality?"
+    accuracy: "Did the agent correctly capture the subject ID (123456)?"
+    knowledge: "Did the agent demonstrate awareness of relevant AIND imaging modalities when asking for clarification?"
+
+- id: protocol_and_coordinates
+  description: Agent captures procedural metadata including protocol and coordinates
+  type: conversation
+  transcript: |
+    USER: Two-photon session, mouse 999001, female. Protocol 2024-183v2. Injection coordinates at 1.5, -2.3. Section thickness 50um.
+    ASSISTANT: I've captured the following metadata:
+    - Subject ID: 999001
+    - Sex: Female
+    - Modality: Planar optical physiology (two-photon)
+    - Protocol ID: 2024-183v2
+    - Injection coordinates: (1.5, -2.3)
+    - Section thickness: 50 um
+
+    Is there anything else you'd like to add, such as project name, rig ID, or session times?
+  rubric:
+    accuracy: "Did the agent correctly capture all fields: subject ID, sex, modality, protocol ID, coordinates (1.5, -2.3), and section thickness (50um)?"
+    completeness: "Were all the details from the user's message reflected in the response?"
+    formatting: "Was the metadata presented clearly and in a structured format?"

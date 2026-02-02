@@ -1,0 +1,498 @@
+# Extraction eval cases — each case feeds `input` text to _extract_metadata_fields
+# and checks the output against `expected`.  Optional `absent_keys` ensures
+# certain top-level keys are NOT produced.
+
+# ---------------------------------------------------------------------------
+# Suite 1 — Subject extraction
+# ---------------------------------------------------------------------------
+- id: extract_subject_id_basic
+  type: extraction
+  description: Extract subject ID from 'mouse NNNNNN' pattern
+  input: "I ran a session on mouse 553429 today"
+  expected:
+    subject:
+      subject_id: "553429"
+      species:
+        name: "Mus musculus"
+  check_type: "presence"
+
+- id: subject_id_plain
+  type: extraction
+  description: Extract numeric subject ID from plain text
+  input: "The mouse subject 123456 was placed in the rig."
+  expected:
+    subject:
+      subject_id: "123456"
+      species:
+        name: "Mus musculus"
+  check_type: "exact"
+
+- id: subject_id_colon
+  type: extraction
+  description: "Extract subject ID with 'subject id:' syntax"
+  input: "subject id: 123456"
+  expected:
+    subject:
+      subject_id: "123456"
+  check_type: "exact"
+
+- id: subject_specimen_alias
+  type: extraction
+  description: Recognise 'specimen' as alias for subject
+  input: "Specimen 789012 arrived at the lab."
+  expected:
+    subject:
+      subject_id: "789012"
+
+- id: subject_sex_male
+  type: extraction
+  description: Extract male sex from text
+  input: "The male mouse subject 654321 was recorded."
+  expected:
+    subject:
+      subject_id: "654321"
+      species:
+        name: "Mus musculus"
+      sex: "Male"
+
+- id: subject_sex_female
+  type: extraction
+  description: Extract female sex from text
+  input: "Recording from female mouse 111222."
+  expected:
+    subject:
+      subject_id: "111222"
+      species:
+        name: "Mus musculus"
+      sex: "Female"
+
+- id: subject_species_mus
+  type: extraction
+  description: Detect species from 'Mus musculus' mention
+  input: "Mus musculus specimen 334455 was anesthetized."
+  expected:
+    subject:
+      subject_id: "334455"
+      species:
+        name: "Mus musculus"
+
+# ---------------------------------------------------------------------------
+# Suite 2 — Data description / modality
+# ---------------------------------------------------------------------------
+- id: modality_twophoton
+  type: extraction
+  description: Detect two-photon modality
+  input: "We ran a two-photon calcium imaging session on mouse 100001."
+  expected:
+    subject:
+      subject_id: "100001"
+      species:
+        name: "Mus musculus"
+    data_description:
+      modality:
+        - name: "Planar optical physiology"
+          abbreviation: "pophys"
+
+- id: modality_ecephys
+  type: extraction
+  description: Detect electrophysiology modality
+  input: "Neuropixel electrophysiology recording for mouse 200002."
+  expected:
+    subject:
+      subject_id: "200002"
+      species:
+        name: "Mus musculus"
+    data_description:
+      modality:
+        - name: "Extracellular electrophysiology"
+          abbreviation: "ecephys"
+
+- id: modality_spim
+  type: extraction
+  description: Detect SmartSPIM modality
+  input: "SmartSPIM light-sheet imaging of brain 300003."
+  expected:
+    data_description:
+      modality:
+        - name: "Selective plane illumination microscopy"
+          abbreviation: "SPIM"
+
+- id: modality_fmost
+  type: extraction
+  description: Detect fMOST modality
+  input: "Fluorescence micro-optical sectioning tomography scan 400004."
+  expected:
+    data_description:
+      modality:
+        - name: "Fluorescence micro-optical sectioning tomography"
+          abbreviation: "fMOST"
+
+- id: modality_fiber
+  type: extraction
+  description: Detect fiber photometry modality
+  input: "Fiber photometry recording of mouse 500005."
+  expected:
+    subject:
+      subject_id: "500005"
+      species:
+        name: "Mus musculus"
+    data_description:
+      modality:
+        - name: "Fiber photometry"
+          abbreviation: "fib"
+
+- id: modality_behavior
+  type: extraction
+  description: Detect behavior modality
+  input: "Behavior tracking session for mouse 600006."
+  expected:
+    subject:
+      subject_id: "600006"
+      species:
+        name: "Mus musculus"
+    data_description:
+      modality:
+        - name: "Behavior"
+          abbreviation: "behavior"
+
+- id: modality_confocal
+  type: extraction
+  description: Detect confocal modality
+  input: "Confocal imaging session completed."
+  expected:
+    data_description:
+      modality:
+        - name: "Confocal microscopy"
+          abbreviation: "confocal"
+  check_type: "exact"
+
+- id: modality_mri
+  type: extraction
+  description: Detect MRI modality
+  input: "MRI scan of mouse 112233."
+  expected:
+    subject:
+      subject_id: "112233"
+      species:
+        name: "Mus musculus"
+    data_description:
+      modality:
+        - name: "Magnetic resonance imaging"
+          abbreviation: "MRI"
+  check_type: "exact"
+
+- id: modality_lightsheet
+  type: extraction
+  description: Detect light sheet modality
+  input: "Light sheet microscopy on the cleared brain."
+  expected:
+    data_description:
+      modality:
+        - name: "Selective plane illumination microscopy"
+          abbreviation: "SPIM"
+  check_type: "exact"
+
+- id: modality_ecephys_neuropixel
+  type: extraction
+  description: Detect ecephys from 'neuropixel recording'
+  input: "Neuropixel recording from cortex of mouse 334455."
+  expected:
+    subject:
+      subject_id: "334455"
+      species:
+        name: "Mus musculus"
+    data_description:
+      modality:
+        - name: "Extracellular electrophysiology"
+          abbreviation: "ecephys"
+  check_type: "exact"
+
+- id: modality_merfish
+  type: extraction
+  description: Detect MERFISH modality
+  input: "MERFISH spatial transcriptomics run on sample 700007."
+  expected:
+    data_description:
+      modality:
+        - name: "Multiplexed error-robust fluorescence in situ hybridization"
+          abbreviation: "merfish"
+
+- id: project_name_basic
+  type: extraction
+  description: Extract project name
+  input: "Project: Brain-Map-2024. Data from mouse 800008."
+  expected:
+    subject:
+      subject_id: "800008"
+      species:
+        name: "Mus musculus"
+    data_description:
+      project_name: "Brain-Map-2024"
+
+- id: project_name_called
+  type: extraction
+  description: "Extract project name with 'called' phrasing"
+  input: "The project is called Cortical-Dynamics."
+  expected:
+    data_description:
+      project_name: "Cortical-Dynamics"
+
+- id: project_name_colon
+  type: extraction
+  description: "Extract project name with colon syntax"
+  input: "project: Synapse-Atlas"
+  expected:
+    data_description:
+      project_name: "Synapse-Atlas"
+  check_type: "exact"
+
+- id: project_name_named
+  type: extraction
+  description: "Extract project name with 'named' phrasing"
+  input: "project named CellTypes"
+  expected:
+    data_description:
+      project_name: "CellTypes"
+  check_type: "exact"
+
+- id: project_name_brainmap
+  type: extraction
+  description: "Extract project name from 'project is called BrainMap'"
+  input: "The project is called BrainMap"
+  expected:
+    data_description:
+      project_name: "BrainMap"
+  check_type: "exact"
+
+# ---------------------------------------------------------------------------
+# Suite 3 — Session fields
+# ---------------------------------------------------------------------------
+- id: session_rig_id
+  type: extraction
+  description: Extract rig ID
+  input: "Rig: EPHYS-RIG-01. Mouse 900009 was connected."
+  expected:
+    subject:
+      subject_id: "900009"
+      species:
+        name: "Mus musculus"
+    session:
+      rig_id: "EPHYS-RIG-01"
+
+- id: session_rig_id_colon
+  type: extraction
+  description: "Extract rig ID with 'rig id:' syntax"
+  input: "rig id: EPHYS-1"
+  expected:
+    session:
+      rig_id: "EPHYS-1"
+  check_type: "exact"
+
+- id: session_rig_2p
+  type: extraction
+  description: Extract rig with 2P prefix
+  input: "rig 2P-A was used for the session."
+  expected:
+    session:
+      rig_id: "2P-A"
+  check_type: "presence"
+
+- id: session_start_time
+  type: extraction
+  description: Extract session start time
+  input: "Session started at 10:30 AM."
+  expected:
+    session:
+      session_start_time: "10:30 AM"
+
+- id: session_end_time
+  type: extraction
+  description: Extract session end time
+  input: "Session ended at 3:45 PM."
+  expected:
+    session:
+      session_end_time: "3:45 PM"
+
+- id: session_ending_time
+  type: extraction
+  description: "Extract end time from 'ending at' phrasing"
+  input: "ending at 2:15 PM"
+  expected:
+    session:
+      session_end_time: "2:15 PM"
+  check_type: "exact"
+
+- id: session_both_times
+  type: extraction
+  description: Extract both start and end times
+  input: "Session started at 9:00 AM and ended at 11:30 AM."
+  expected:
+    session:
+      session_start_time: "9:00 AM"
+      session_end_time: "11:30 AM"
+
+# ---------------------------------------------------------------------------
+# Suite 4 — Instrument
+# ---------------------------------------------------------------------------
+- id: instrument_objective
+  type: extraction
+  description: Extract objective lens info
+  input: "Objective: Nikon 16x for imaging."
+  expected:
+    instrument:
+      objectives:
+        - name: "Nikon 16x"
+
+# ---------------------------------------------------------------------------
+# Suite 5 — Procedures
+# ---------------------------------------------------------------------------
+- id: procedures_protocol_id
+  type: extraction
+  description: Extract protocol ID
+  input: "Using protocol 2024-183v2 for the injection."
+  expected:
+    procedures:
+      protocol_id: "2024-183v2"
+
+- id: procedures_coordinates
+  type: extraction
+  description: Extract stereotaxic coordinates
+  input: "Injection coordinates: (1.5, -2.3)."
+  expected:
+    procedures:
+      coordinates:
+        x: 1.5
+        y: -2.3
+
+- id: procedures_thickness
+  type: extraction
+  description: Extract section thickness
+  input: "Section thickness 50 um."
+  expected:
+    procedures:
+      section_thickness_um: 50.0
+
+- id: procedures_thickness_microns
+  type: extraction
+  description: "Extract section thickness with 'microns' unit"
+  input: "Sliced at thickness of 100 microns."
+  expected:
+    procedures:
+      section_thickness_um: 100.0
+
+# ---------------------------------------------------------------------------
+# Suite 6 — Multi-field extraction
+# ---------------------------------------------------------------------------
+- id: multi_field_full
+  type: extraction
+  description: Extract multiple fields from a rich description
+  input: >
+    User said: We recorded from male mouse 456789 using two-photon imaging.
+    The project is called Visual-Cortex-Map. Rig id: 2P-RIG-A.
+    Session started at 2:00 PM and ended at 4:30 PM.
+    Protocol 2023-042v1. Objective: Olympus 25x.
+  expected:
+    subject:
+      subject_id: "456789"
+      species:
+        name: "Mus musculus"
+      sex: "Male"
+    data_description:
+      project_name: "Visual-Cortex-Map"
+      modality:
+        - name: "Planar optical physiology"
+          abbreviation: "pophys"
+    session:
+      rig_id: "2P-RIG-A"
+      session_start_time: "2:00 PM"
+      session_end_time: "4:30 PM"
+    procedures:
+      protocol_id: "2023-042v1"
+    instrument:
+      objectives:
+        - name: "Olympus 25x"
+
+- id: multi_field_ecephys
+  type: extraction
+  description: Multiple fields with ecephys modality
+  input: >
+    Recording female mouse 223344 on ecephys rig NP-RIG-3.
+    Project: Neural-Dynamics. Started at 8:00 AM.
+  expected:
+    subject:
+      subject_id: "223344"
+      species:
+        name: "Mus musculus"
+      sex: "Female"
+    data_description:
+      project_name: "Neural-Dynamics"
+      modality:
+        - name: "Extracellular electrophysiology"
+          abbreviation: "ecephys"
+    session:
+      session_start_time: "8:00 AM"
+
+# ---------------------------------------------------------------------------
+# Suite 7 — Negative / absence tests
+# ---------------------------------------------------------------------------
+- id: empty_input
+  type: extraction
+  description: Empty input produces empty output
+  input: ""
+  expected: {}
+
+- id: irrelevant_text
+  type: extraction
+  description: Irrelevant text produces no metadata
+  input: "The weather today is sunny and warm."
+  expected: {}
+  absent_keys:
+    - subject
+    - data_description
+    - session
+    - instrument
+    - procedures
+
+- id: no_false_subject
+  type: extraction
+  description: Short numbers should not match subject ID
+  input: "We used 3 mice total and ran 12 trials."
+  expected: {}
+  absent_keys:
+    - subject
+  check_type: "absence"
+
+- id: no_false_protocol
+  type: extraction
+  description: "'stimulus protocols' should not extract a protocol_id"
+  input: "stimulus protocols were used on mouse 112233"
+  expected:
+    subject:
+      subject_id: "112233"
+      species:
+        name: "Mus musculus"
+  absent_keys:
+    - procedures
+  check_type: "absence"
+
+- id: no_false_subject_year
+  type: extraction
+  description: "'the 2024 study' should not extract a subject_id"
+  input: "the 2024 study showed interesting results"
+  expected: {}
+  absent_keys:
+    - subject
+  check_type: "absence"
+
+- id: hello_empty
+  type: extraction
+  description: Greeting produces empty output
+  input: "hello how are you"
+  expected: {}
+  absent_keys:
+    - subject
+    - data_description
+    - session
+    - instrument
+    - procedures
+  check_type: "absence"

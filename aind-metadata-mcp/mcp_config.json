@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aind-metadata-mcp": {
+      "type": "stdio",
+      "command": "aind-metadata-mcp"
+    }
+  }
+}
