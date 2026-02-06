@@ -1,28 +1,30 @@
 # AIND Metadata Capture
 
-A real-time metadata capture and validation platform for the Allen Institute for Neural Dynamics (AIND). Scientists describe their experiments in natural language; a Claude-powered agent extracts structured metadata, validates it against AIND schemas and external registries, and proactively prompts for missing information.
+A real-time metadata capture and validation platform for the Allen Institute for Neural Dynamics (AIND). Scientists describe their experiments in natural language; a Claude-powered agent extracts structured metadata, validates it against AIND schemas and external registries, and saves it as granular, linkable records.
 
 ## Features
 
 - **Conversational capture** — Chat interface where scientists describe experiments in plain language
-- **Automatic extraction** — Agent extracts structured metadata fields (subject ID, species, modality, project, session times, protocol, coordinates, etc.) via native Claude tool calls
-- **Token-by-token streaming** — Real-time SSE streaming with a stop button to abort mid-response
+- **Context-aware extraction** — Agent only asks about metadata relevant to what the user is describing (no irrelevant follow-ups about modality when you're describing a surgery)
+- **Granular records** — Each metadata type (subject, procedures, instrument, session, etc.) is stored as its own record, not lumped into one monolithic entry
+- **Shared vs asset-specific** — Subjects, instruments, procedures, and rigs are reusable across experiments; sessions, acquisitions, and data descriptions are tied to specific data assets
+- **Cross-session linking** — Shared records created in one chat can be found and linked from another chat
+- **Token-by-token streaming** — Real-time SSE streaming with stop button, tool progress indicators with elapsed timers, and model selector (Opus/Sonnet/Haiku)
 - **Live database validation** — Validates project names, subject IDs, and modalities against AIND's live MongoDB via MCP
 - **Registry validation** — Cross-references Addgene, NCBI GenBank, and MGI databases
-- **Proactive prompting** — Identifies missing required fields and asks the scientist
 - **Session persistence** — Conversations survive page reloads; a sidebar lets you switch between chats
-- **Inline-editable dashboard** — Click any value to edit, rename, or delete fields; add new ones with a single keystroke; schema-guided placeholders for every known field
+- **Dashboard with two views** — Session view groups records by chat session; Library view groups by record type (shared vs asset). Inline editing, field deletion, and schema-guided placeholders
 - **Live health indicator** — Header badge polls the backend and shows Agent Online / Offline in real time
 
 ## Architecture
 
 The system has three components:
 
-1. **Agent backend** (`agent/`) — Python service using the Claude Agent SDK, wrapped in FastAPI. Streams token-by-token via `include_partial_messages` + `StreamEvent`. Metadata extraction happens through native Claude tool calls (`capture_metadata`). Stores drafts and conversation history in SQLite.
+1. **Agent backend** (`agent/`) — Python service using the Claude Agent SDK, wrapped in FastAPI. Streams token-by-token via `include_partial_messages` + `StreamEvent`. Three MCP tools for metadata capture: `capture_metadata` (one record type per call), `find_records` (search existing shared records), and `link_records` (associate related records). Stores records, links, and conversation history in SQLite.
 
-2. **Web frontend** (`frontend/`) — Next.js 14 app with TypeScript and Tailwind CSS. Three-pane layout: a sessions sidebar for switching chats, a token-streaming chat panel with a stop button, and a metadata sidebar with clickable cards. A separate dashboard page lets you inline-edit, rename, delete, and add metadata fields with auto-save.
+2. **Web frontend** (`frontend/`) — Next.js 14 app with TypeScript and Tailwind CSS. Three-pane layout: sessions sidebar, token-streaming chat panel with model selector, and metadata sidebar grouped by record type. Dashboard page with session/library view toggle and inline editing.
 
-3. **AIND MCP server** (`aind-metadata-mcp/`) — MCP server with 20 tools for read-only access to AIND's live metadata MongoDB (hosted at `api.allenneuraldynamics.org`). Connected to the agent via stdio transport — the agent can query project names, look up existing records, fetch example schemas, and validate metadata against production data.
+3. **AIND MCP server** (`aind-metadata-mcp/`) — MCP server with 20 tools for read-only access to AIND's live metadata MongoDB (hosted at `api.allenneuraldynamics.org`). Connected to the agent via stdio transport.
 
 ## Quick Start
 
@@ -59,12 +61,16 @@ The API will be available at `http://localhost:8001`. Key endpoints:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/chat` | POST | Send a message, receive token-level SSE stream |
-| `/metadata` | GET | List all draft metadata entries |
-| `/metadata/{id}/fields` | PUT | Update a single metadata section (inline editing) |
-| `/metadata/{id}/confirm` | POST | Confirm a draft entry |
+| `/chat` | POST | Send a message (with optional `model`), receive token-level SSE stream |
+| `/records` | GET | List all metadata records (filter by `type`, `category`, `session_id`, `status`) |
+| `/records/{id}` | GET | Get a single record with its linked records |
+| `/records/{id}` | PUT | Update a record's data |
+| `/records/{id}/confirm` | POST | Confirm a record |
+| `/records/link` | POST | Link two records together |
 | `/sessions` | GET | List all chat sessions with message counts |
 | `/sessions/{id}/messages` | GET | Full conversation history for a session |
+| `/sessions/{id}/records` | GET | All records created in a session |
+| `/models` | GET | List available models and the default |
 | `/health` | GET | Health check (polled by the frontend every 5 s) |
 
 ### Frontend
@@ -79,19 +85,25 @@ npm run dev
 
 Open `http://localhost:3000`. The frontend connects to the backend at `localhost:8001` by default (configurable via `NEXT_PUBLIC_API_URL`).
 
+## Database Schema
+
+The SQLite database uses two main tables:
+
+- **`metadata_records`** — One row per typed record. Each record has a `record_type` (subject, procedures, instrument, rig, data_description, acquisition, session, processing, quality_control) and a `category` (shared or asset). Shared records are reusable across experiments; asset records are tied to specific data assets.
+
+- **`record_links`** — Explicit many-to-many links between records (e.g., a session linked to a subject). Links are bidirectional.
+
+- **`conversations`** — Multi-turn chat history.
+
 ## Example Interaction
 
-**Scientist:** "I ran a two-photon calcium imaging session on mouse 553429 today. The project is called BrainMap. Started at 10:30 AM, ending at 2:15 PM."
+**Scientist:** "I performed a stereotactic injection on mouse 123456 today, targeting the thalamus with GFP adenovirus."
 
-**Agent extracts:**
-- `subject.subject_id`: "553429"
-- `subject.species.name`: "Mus musculus"
-- `data_description.modality`: "pophys" (two-photon optical physiology)
-- `data_description.project_name`: "BrainMap"
-- `session.session_start_time`: "10:30 AM"
-- `session.session_end_time`: "2:15 PM"
+**Agent creates two records:**
+- **Subject** (shared): `{subject_id: "123456", species: {name: "Mus musculus"}}`
+- **Procedures** (shared): `{procedure_type: "Injection", injection_type: "Stereotactic", target_brain_region: "Thalamus", injection_materials: "GFP Adenovirus", ...}`
 
-The agent then asks about missing required fields like sex, rig ID, and protocol.
+The agent only asks follow-up questions about the procedure — not about modality, project name, or session timing, since those aren't relevant to what the user described.
 
 ## Evals
 
@@ -110,17 +122,18 @@ python3 -m pytest evals/tasks/validation/ -v -m network
 
 ## Project Status
 
-- [x] Phase 1: Agent core (Claude Agent SDK + FastAPI)
-- [x] Phase 2: Local storage (SQLite + CRUD tools)
-- [x] Phase 3: Validation (schema validation, Addgene/NCBI/MGI registries, live AIND MongoDB via MCP)
-- [x] Phase 3.5: Tool-based extraction (replaced regex with native Claude tool calls)
-- [x] Phase 4: Chat interface (token streaming, stop button, sessions sidebar, session persistence)
-- [x] Phase 5: Dashboard (inline edit/rename/delete/add fields, schema placeholders, auto-save)
-- [x] Phase 6: Streaming & UX polish (terracotta theme, live health indicator, auto-expanding input)
-- [x] Eval suite (60 tests across 5 suites)
-- [ ] Auto-trigger registry lookups — when extraction finds a `protocol_id`, gene name, or plasmid reference, automatically call the Addgene/NCBI/MGI lookup functions and attach results to the draft (functions exist in `registry_lookup.py` but are not yet called from the extraction flow)
-- [ ] Validation feedback loop — after `_validate_and_store()` runs, feed validation errors/warnings back into the agent's conversation context so it can proactively surface issues (e.g. "Your subject ID looks invalid") in its next response
-- [ ] Deeper schema validation via `aind-data-schema` — replace hardcoded enums/formats in `validation.py` with Pydantic model validation from the `aind-data-schema` package so validation stays in sync with the real AIND schemas
+- [x] Agent core (Claude Agent SDK + FastAPI + model selector)
+- [x] Granular metadata records (per-type records with shared/asset categories)
+- [x] Record linking (explicit many-to-many links, cross-session reuse)
+- [x] Validation (per-record-type schema validation, Addgene/NCBI/MGI registries, live AIND MongoDB via MCP)
+- [x] Context-aware tool-based extraction (3 MCP tools: capture, find, link)
+- [x] Chat interface (token streaming, tool progress indicators with elapsed timers, model selector)
+- [x] Dashboard (session view + library view, inline editing, schema placeholders)
+- [x] Streaming & UX polish (terracotta theme, live health indicator, shimmer animations)
+- [x] Eval suite (53 deterministic tests + LLM-graded + network tests)
+- [ ] Auto-trigger registry lookups when relevant fields are extracted
+- [ ] Validation feedback loop into agent conversation for proactive prompting
+- [ ] Deeper schema validation via `aind-data-schema` Pydantic models
 - [ ] Multi-modal input (audio recordings, images of lab notebooks, documents)
 - [ ] MCP write access to AIND MongoDB
 - [ ] Cloud deployment

@@ -45,24 +45,63 @@ function CategoryBadge({ category }: { category: string }) {
   );
 }
 
+/** Try to parse a JSON string; return parsed value or original. */
+function tryParseJson(v: unknown): unknown {
+  if (typeof v !== 'string') return v;
+  const trimmed = v.trim();
+  if ((trimmed.startsWith('[') || trimmed.startsWith('{')) && trimmed.length > 2) {
+    try { return JSON.parse(trimmed); } catch { /* not JSON */ }
+  }
+  return v;
+}
+
+/** Render any value as a human-readable string. */
+function humanize(v: unknown): string {
+  const parsed = tryParseJson(v);
+  if (parsed == null) return '';
+  if (typeof parsed !== 'object') return String(parsed);
+  if (Array.isArray(parsed)) {
+    return parsed.map((item) => humanize(item)).join(', ');
+  }
+  const obj = parsed as Record<string, unknown>;
+  // {name: "..."} → just the name
+  if ('name' in obj && Object.keys(obj).length <= 2) return String(obj.name);
+  // Small objects → "key: val, key: val"
+  return Object.entries(obj)
+    .map(([k, val]) => `${k.replace(/_/g, ' ')}: ${humanize(val)}`)
+    .join(', ');
+}
+
 /** Flatten a nested metadata object into readable key-value pairs. */
 function flattenFields(obj: unknown, prefix = ''): { label: string; value: string }[] {
-  if (obj == null) return [];
-  if (typeof obj !== 'object') return [{ label: prefix || 'value', value: String(obj) }];
+  const parsed = tryParseJson(obj);
+  if (parsed == null) return [];
+  if (typeof parsed !== 'object') return [{ label: prefix || 'value', value: String(parsed) }];
+  if (Array.isArray(parsed)) {
+    // Simple arrays → one row; complex arrays → recurse per item
+    const isSimple = parsed.every((item) =>
+      typeof item !== 'object' || (item && 'name' in item && Object.keys(item).length <= 2)
+    );
+    if (isSimple || parsed.length === 0) {
+      return [{ label: prefix, value: parsed.map((item) => humanize(item)).join(', ') }];
+    }
+    return parsed.flatMap((item, i) => flattenFields(item, `${prefix} [${i + 1}]`));
+  }
   const entries: { label: string; value: string }[] = [];
-  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
     const label = prefix ? `${prefix} > ${k.replace(/_/g, ' ')}` : k.replace(/_/g, ' ');
-    if (v != null && typeof v === 'object' && !Array.isArray(v)) {
-      const nested = v as Record<string, unknown>;
-      if (Object.keys(nested).length === 1 && 'name' in nested) {
+    const pv = tryParseJson(v);
+    if (pv != null && typeof pv === 'object' && !Array.isArray(pv)) {
+      const nested = pv as Record<string, unknown>;
+      if (Object.keys(nested).length <= 2 && 'name' in nested) {
         entries.push({ label, value: String(nested.name) });
       } else {
-        entries.push(...flattenFields(v, label));
+        entries.push(...flattenFields(pv, label));
       }
-    } else if (Array.isArray(v)) {
-      entries.push({ label, value: v.map((item) => (typeof item === 'object' ? (item as Record<string, unknown>).name ?? JSON.stringify(item) : String(item))).join(', ') });
+    } else if (Array.isArray(pv)) {
+      entries.push(...flattenFields(pv, label));
     } else {
-      entries.push({ label, value: String(v) });
+      entries.push({ label, value: humanize(pv) });
     }
   }
   return entries;

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import Link from 'next/link';
 import { fetchRecords, confirmRecord, updateRecordData, MetadataRecord, fetchSessions, Session } from '../lib/api';
 import Header from '../components/Header';
@@ -59,6 +59,28 @@ const FIELD_SCHEMAS: Record<string, { label: string; key: string }[]> = {
 // Shared components
 // ---------------------------------------------------------------------------
 
+/** Render any value as a human-readable string. */
+function humanize(v: unknown): string {
+  // Try to parse JSON strings first
+  let parsed = v;
+  if (typeof v === 'string') {
+    const trimmed = v.trim();
+    if ((trimmed.startsWith('[') || trimmed.startsWith('{')) && trimmed.length > 2) {
+      try { parsed = JSON.parse(trimmed); } catch { /* not JSON */ }
+    }
+  }
+  if (parsed == null) return '';
+  if (typeof parsed !== 'object') return String(parsed);
+  if (Array.isArray(parsed)) {
+    return parsed.map((item) => humanize(item)).join(', ');
+  }
+  const obj = parsed as Record<string, unknown>;
+  if ('name' in obj && Object.keys(obj).length <= 2) return String(obj.name);
+  return Object.entries(obj)
+    .map(([k, val]) => `${k.replace(/_/g, ' ')}: ${humanize(val)}`)
+    .join(', ');
+}
+
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     draft: 'bg-brand-orange-100 text-brand-orange-600 border-brand-orange-500/20',
@@ -85,6 +107,87 @@ function CategoryBadge({ category }: { category: string }) {
   );
 }
 
+interface EditorRow {
+  key: string;
+  label: string;
+  value: string;
+  /** If set, this row is a section header (non-editable divider). */
+  isHeader?: boolean;
+}
+
+/** Try to parse a JSON string; return parsed value or original. */
+function tryParseJson(v: unknown): unknown {
+  if (typeof v !== 'string') return v;
+  const trimmed = v.trim();
+  if ((trimmed.startsWith('[') || trimmed.startsWith('{')) && trimmed.length > 2) {
+    try { return JSON.parse(trimmed); } catch { /* not JSON */ }
+  }
+  return v;
+}
+
+/** Flatten nested data into rows for the record editor. */
+function flattenForEditor(
+  obj: Record<string, unknown>,
+  schemaFields: { label: string; key: string }[],
+): EditorRow[] {
+  const schemaLabelMap = new Map(schemaFields.map((s) => [s.key, s.label]));
+  const rows: EditorRow[] = [];
+
+  function walk(data: unknown, keyPath: string, label: string) {
+    if (data == null) return;
+    const parsed = tryParseJson(data);
+    if (typeof parsed === 'string') {
+      rows.push({ key: keyPath, label, value: parsed });
+      return;
+    }
+    if (typeof parsed !== 'object') {
+      rows.push({ key: keyPath, label, value: String(parsed) });
+      return;
+    }
+    if (Array.isArray(parsed)) {
+      // Simple arrays (strings, numbers, {name:"..."}) → one row
+      const isSimple = parsed.every((item) =>
+        typeof item !== 'object' || (item && 'name' in item && Object.keys(item).length <= 2)
+      );
+      if (isSimple || parsed.length === 0) {
+        rows.push({ key: keyPath, label, value: parsed.map((item) => humanize(item)).join(', ') });
+      } else {
+        // Complex arrays → section header per item, then flat child fields
+        parsed.forEach((item, i) => {
+          // Add a visual header for each array item
+          const headerLabel = parsed.length === 1 ? label : `${label} #${i + 1}`;
+          rows.push({ key: `${keyPath}[${i}]`, label: headerLabel, value: '', isHeader: true });
+          // Flatten item's fields directly (no deep nesting in labels)
+          if (item && typeof item === 'object' && !Array.isArray(item)) {
+            for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
+              walk(v, `${keyPath}[${i}].${k}`, k.replace(/_/g, ' '));
+            }
+          } else {
+            rows.push({ key: `${keyPath}[${i}]`, label: `item`, value: humanize(item) });
+          }
+        });
+      }
+      return;
+    }
+    const obj = parsed as Record<string, unknown>;
+    // {name: "..."} with 1-2 keys → collapse
+    if ('name' in obj && Object.keys(obj).length <= 2) {
+      rows.push({ key: keyPath, label, value: String(obj.name) });
+      return;
+    }
+    // Recurse into nested objects — use just the child key name as label
+    for (const [k, v] of Object.entries(obj)) {
+      walk(v, `${keyPath}.${k}`, k.replace(/_/g, ' '));
+    }
+  }
+
+  for (const [k, v] of Object.entries(obj)) {
+    const label = schemaLabelMap.get(k) || k.replace(/_/g, ' ');
+    walk(v, k, label);
+  }
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // Inline field editor for a single record
 // ---------------------------------------------------------------------------
@@ -99,14 +202,10 @@ function RecordEditor({
   const data = (record.data_json || {}) as Record<string, unknown>;
   const schema = FIELD_SCHEMAS[record.record_type] || [];
 
-  // Build field list: existing fields + missing schema fields
+  // Build field list: existing fields (flattened) + missing schema fields
   const existingKeys = new Set(Object.keys(data));
-  const existingFields = Object.entries(data).map(([key, val]) => ({
-    key,
-    label: schema.find((s) => s.key === key)?.label || key.replace(/_/g, ' '),
-    value: typeof val === 'object' ? JSON.stringify(val) : String(val ?? ''),
-  }));
-  const missingFields = schema
+  const existingFields = flattenForEditor(data, schema);
+  const missingFields: EditorRow[] = schema
     .filter((s) => !existingKeys.has(s.key))
     .map((s) => ({ key: s.key, label: s.label, value: '' }));
 
@@ -121,7 +220,17 @@ function RecordEditor({
   const saveField = async (key: string, value: string) => {
     setEditingKey(null);
     if (!value.trim()) return;
-    const newData = { ...data, [key]: value.trim() };
+    // Support dot-path keys like "coordinates.x"
+    const parts = key.split('.');
+    const newData = structuredClone(data);
+    let target: Record<string, unknown> = newData;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!(parts[i] in target) || typeof target[parts[i]] !== 'object') {
+        target[parts[i]] = {};
+      }
+      target = target[parts[i]] as Record<string, unknown>;
+    }
+    target[parts[parts.length - 1]] = value.trim();
     try {
       await updateRecordData(record.id, newData);
       onSaved();
@@ -142,7 +251,9 @@ function RecordEditor({
   };
 
   const deleteField = async (key: string) => {
-    const { [key]: _, ...rest } = data;
+    const parts = key.split('.');
+    const topKey = parts[0];
+    const { [topKey]: _, ...rest } = data;
     try {
       await updateRecordData(record.id, rest);
       onSaved();
@@ -160,51 +271,57 @@ function RecordEditor({
         <span className="text-[10px] text-sand-400 ml-auto">{record.id.slice(0, 8)}</span>
       </div>
       <div className="space-y-0.5">
-        {allFields.map((field) => (
-          <div
-            key={field.key}
-            className="flex text-xs gap-2 items-center rounded px-1 -mx-1 py-0.5 group hover:bg-sand-50"
-          >
-            <span className="text-sand-400 shrink-0 w-36 truncate capitalize">{field.label}:</span>
-            {editingKey === field.key ? (
-              <input
-                autoFocus
-                value={editValue}
-                onChange={(e) => setEditValue(e.target.value)}
-                onBlur={() => saveField(field.key, editValue)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                  if (e.key === 'Escape') setEditingKey(null);
-                }}
-                className="text-sand-700 flex-1 border-b border-brand-fig/50 bg-transparent py-0.5 focus:outline-none"
-              />
-            ) : field.value ? (
-              <>
+        {allFields.map((field) =>
+          field.isHeader ? (
+            <div key={field.key} className="pt-2 pb-0.5 first:pt-0">
+              <span className="text-[10px] font-semibold text-sand-400 uppercase tracking-wider capitalize">{field.label}</span>
+            </div>
+          ) : (
+            <div
+              key={field.key}
+              className="flex text-xs gap-2 items-center rounded px-1 -mx-1 py-0.5 group hover:bg-sand-50"
+            >
+              <span className="text-sand-400 shrink-0 w-36 truncate capitalize">{field.label}:</span>
+              {editingKey === field.key ? (
+                <input
+                  autoFocus
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={() => saveField(field.key, editValue)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                    if (e.key === 'Escape') setEditingKey(null);
+                  }}
+                  className="text-sand-700 flex-1 border-b border-brand-fig/50 bg-transparent py-0.5 focus:outline-none"
+                />
+              ) : field.value ? (
+                <>
+                  <span
+                    className="text-sand-700 flex-1 cursor-pointer"
+                    onClick={() => { setEditingKey(field.key); setEditValue(field.value); }}
+                  >
+                    {field.value}
+                  </span>
+                  <button
+                    onClick={() => deleteField(field.key)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-sand-300 hover:text-brand-orange-600 shrink-0"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                      <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6" />
+                    </svg>
+                  </button>
+                </>
+              ) : (
                 <span
-                  className="text-sand-700 flex-1 cursor-pointer"
-                  onClick={() => { setEditingKey(field.key); setEditValue(field.value); }}
+                  className="text-sand-300 italic cursor-pointer hover:text-sand-400"
+                  onClick={() => { setEditingKey(field.key); setEditValue(''); }}
                 >
-                  {field.value}
+                  click to add
                 </span>
-                <button
-                  onClick={() => deleteField(field.key)}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity text-sand-300 hover:text-brand-orange-600 shrink-0"
-                >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-                    <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6" />
-                  </svg>
-                </button>
-              </>
-            ) : (
-              <span
-                className="text-sand-300 italic cursor-pointer hover:text-sand-400"
-                onClick={() => { setEditingKey(field.key); setEditValue(''); }}
-              >
-                click to add
-              </span>
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          )
+        )}
 
         {addingField ? (
           <div className="flex text-xs gap-2 items-center pt-1.5">
@@ -303,9 +420,8 @@ function SessionView({
           const isExpanded = expandedId === sid;
 
           return (
-            <>{/* eslint-disable-next-line react/jsx-key */}
+            <Fragment key={sid}>
               <tr
-                key={sid}
                 id={`row-${sid}`}
                 onClick={() => onToggle(sid)}
                 className="border-b border-sand-100 hover:bg-sand-50 cursor-pointer transition-colors"
@@ -364,7 +480,7 @@ function SessionView({
                   </td>
                 </tr>
               )}
-            </>
+            </Fragment>
           );
         })}
       </tbody>
@@ -497,12 +613,11 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [load]);
 
-  // Auto-expand record if navigated via hash
+  // Auto-expand record if navigated via hash (only on first load)
   useEffect(() => {
-    if (records.length === 0) return;
     const hash = window.location.hash.slice(1);
     if (hash) setExpandedId(hash);
-  }, [records]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!expandedId) return;

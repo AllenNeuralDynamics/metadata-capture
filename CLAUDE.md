@@ -129,11 +129,10 @@ metadata-capture/
 **Files:** `agent/validation.py`, `agent/tools/registry_lookup.py`, `agent/tools/capture_mcp.py`
 
 Done:
-- Local schema validation: required fields, enum checks, format rules, cross-field consistency, completeness scoring
+- Per-record-type validation: required fields, enum checks, format rules, completeness scoring
 - External registry lookups: Addgene (catalog + search), NCBI E-utilities, MGI quick search
-- Validation API endpoint: `GET /metadata/{session_id}/validation`
-- Auto-validation after every metadata update via the `capture_metadata` tool
-- Frontend validation display: progress bar, status badges, expandable errors/warnings
+- Auto-validation after every metadata capture/update via the `capture_metadata` tool
+- Validation results stored per-record in `validation_json`
 
 Not yet done:
 - Automatic registry validation in extraction pipeline (functions exist but not auto-triggered)
