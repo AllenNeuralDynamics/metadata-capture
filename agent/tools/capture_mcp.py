@@ -6,13 +6,16 @@ Provides three tools that Claude can call during conversation:
 - link_records: Create explicit links between records
 """
 
+import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from ..shared import validation_events
+from .registry_lookup import lookup_addgene, lookup_mgi, lookup_ncbi_gene
 from .metadata_store import (
     create_record,
     find_records as store_find_records,
@@ -68,6 +71,158 @@ def _success(data: dict[str, Any]) -> dict[str, Any]:
 
 def _error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps({"status": "error", "error": message})}]}
+
+
+# ---------------------------------------------------------------------------
+# Registry lookup helpers
+# ---------------------------------------------------------------------------
+
+# Patterns that look like plasmid/vector names (must have additional chars after prefix)
+_PLASMID_PATTERN = re.compile(
+    r"(?:pAAV|AAV|pCAG|pEF|pCMV)[-\w]+",
+    re.IGNORECASE,
+)
+_ADDGENE_CATALOG_PATTERN = re.compile(r"\b\d{4,6}\b")
+
+
+def _extract_registry_queries(record_type: str, data: dict[str, Any]) -> dict[str, list[str]]:
+    """Identify fields that should trigger external registry lookups.
+
+    Returns a dict mapping registry name -> list of query strings.
+    """
+    queries: dict[str, list[str]] = {}
+
+    if record_type == "subject":
+        # Genotype → MGI + NCBI
+        genotype = data.get("genotype")
+        if genotype and isinstance(genotype, str) and len(genotype) > 2:
+            # Split composite genotypes like "Ai14;Slc17a7-Cre"
+            parts = re.split(r"[;/×x]\s*", genotype)
+            for part in parts:
+                part = part.strip()
+                if part and len(part) > 2:
+                    queries.setdefault("mgi", []).append(part)
+                    queries.setdefault("ncbi_gene", []).append(part)
+
+        # Alleles → MGI
+        alleles = data.get("alleles")
+        if isinstance(alleles, list):
+            for a in alleles:
+                name = a.get("name") if isinstance(a, dict) else str(a) if a else None
+                if name and len(name) > 2:
+                    queries.setdefault("mgi", []).append(name)
+
+    elif record_type == "procedures":
+        # Injection materials → Addgene
+        # Look for plasmid-like names in injection_materials
+        injection_materials = data.get("injection_materials")
+        if injection_materials:
+            mat_str = json.dumps(injection_materials, default=str)
+            for match in _PLASMID_PATTERN.findall(mat_str):
+                queries.setdefault("addgene", []).append(match)
+            for match in _ADDGENE_CATALOG_PATTERN.findall(mat_str):
+                if int(match) > 1000:  # filter out small numbers
+                    queries.setdefault("addgene", []).append(match)
+
+        # Virus names / constructs
+        for field in ["viral_construct", "virus_name", "construct"]:
+            val = data.get(field)
+            if val and isinstance(val, str) and len(val) > 3:
+                queries.setdefault("addgene", []).append(val)
+
+        # Protocol IDs that look like Addgene catalog numbers
+        protocol_id = data.get("protocol_id")
+        if protocol_id and isinstance(protocol_id, str):
+            for match in _ADDGENE_CATALOG_PATTERN.findall(protocol_id):
+                if int(match) > 1000:
+                    queries.setdefault("addgene", []).append(match)
+
+    # Deduplicate
+    for key in queries:
+        queries[key] = list(dict.fromkeys(queries[key]))
+
+    return queries
+
+
+async def _run_registry_lookups(
+    record_type: str, data: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Run external registry lookups for relevant fields. Returns a list of results."""
+    queries = _extract_registry_queries(record_type, data)
+    if not queries:
+        return []
+
+    lookup_fns = {
+        "addgene": lookup_addgene,
+        "ncbi_gene": lookup_ncbi_gene,
+        "mgi": lookup_mgi,
+    }
+
+    tasks: list[tuple[str, str, Any]] = []
+    for registry, terms in queries.items():
+        fn = lookup_fns.get(registry)
+        if fn:
+            for term in terms:
+                tasks.append((registry, term, fn(term)))
+
+    if not tasks:
+        return []
+
+    # Run all lookups concurrently with a short timeout
+    results: list[dict[str, Any]] = []
+    try:
+        coros = [t[2] for t in tasks]
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(*coros, return_exceptions=True),
+            timeout=20.0,
+        )
+        for (registry, term, _), outcome in zip(tasks, outcomes):
+            if isinstance(outcome, Exception):
+                logger.warning("Registry lookup failed for %s/%s: %s", registry, term, outcome)
+                continue
+            result_entry: dict[str, Any] = {"registry": registry, "query": term}
+            if isinstance(outcome, dict):
+                result_entry.update(outcome)
+            results.append(result_entry)
+    except asyncio.TimeoutError:
+        logger.warning("Registry lookups timed out")
+
+    return results
+
+
+def _format_registry_summary(results: list[dict[str, Any]]) -> str:
+    """Format registry lookup results as text for the agent."""
+    if not results:
+        return ""
+
+    lines = ["REGISTRY LOOKUPS:"]
+    for r in results:
+        registry = r.get("registry", "unknown").upper().replace("_", " ")
+        query = r.get("query", "")
+        found = r.get("found", False)
+        error = r.get("error")
+
+        if error:
+            lines.append(f"  - {registry} '{query}': lookup failed ({error})")
+        elif found:
+            # Include key details
+            if r.get("results"):
+                # NCBI gene results
+                for gene in r["results"][:2]:
+                    symbol = gene.get("symbol", "")
+                    desc = gene.get("description", "")
+                    url = gene.get("url", "")
+                    lines.append(f"  - {registry} '{query}': FOUND — {symbol} ({desc}) {url}")
+            elif r.get("url"):
+                lines.append(f"  - {registry} '{query}': FOUND — {r['url']}")
+            else:
+                lines.append(f"  - {registry} '{query}': FOUND")
+        else:
+            lines.append(f"  - {registry} '{query}': NOT FOUND — could not verify in external registry")
+
+    lines.append("")
+    lines.append("Share these registry results with the user to confirm the identifiers are correct.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +296,11 @@ async def capture_metadata_handler(args: dict[str, Any]) -> dict[str, Any]:
         # reliably flags issues to the user in its response.
         validation_summary = _format_validation_summary(validation_dict)
 
-        return _success({
+        # Run external registry lookups for relevant fields (non-blocking).
+        registry_results = await _run_registry_lookups(record_type, record_data)
+        registry_summary = _format_registry_summary(registry_results)
+
+        response: dict[str, Any] = {
             "action": action,
             "record_id": record_id,
             "record_type": record_type,
@@ -150,7 +309,13 @@ async def capture_metadata_handler(args: dict[str, Any]) -> dict[str, Any]:
             "message": f"Successfully {action} {record_type} record",
             "validation": validation_dict,
             "validation_summary": validation_summary,
-        })
+        }
+
+        if registry_results:
+            response["registry_lookups"] = registry_results
+            response["registry_summary"] = registry_summary
+
+        return _success(response)
 
     except Exception as e:
         logger.exception("Failed to save record for session %s", session_id)

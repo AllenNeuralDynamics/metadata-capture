@@ -141,8 +141,8 @@ Done:
 - Validation results streamed back to frontend via `tool_result` SSE events using async queue
 - Validation feedback loop: tool returns human-readable `validation_summary`; system prompt instructs agent to always flag issues and suggest fixes
 
-Not yet done:
-- Automatic registry validation in extraction pipeline (functions exist but not auto-triggered)
+- Auto-triggered registry lookups: genotype/alleles → MGI + NCBI Gene; injection materials → Addgene
+- Registry results included in tool response with human-readable summary; system prompt instructs agent to share results
 
 ### Phase 3.5: Tool-Based Extraction ✅ → Granular Records ✅
 **Files:** `agent/tools/capture_mcp.py`, `agent/service.py`, `agent/prompts/system_prompt.py`
@@ -241,7 +241,6 @@ python3 -m pytest evals/tasks/validation/ -v -m network            # registry lo
 ---
 
 ## Future Work
-- Auto-trigger registry lookups (Addgene, NCBI, MGI) when relevant fields are extracted
 - Multi-modal input (audio, image, video, documents)
 - MCP write access to AIND MongoDB
 - Cloud deployment (Cloud Run)

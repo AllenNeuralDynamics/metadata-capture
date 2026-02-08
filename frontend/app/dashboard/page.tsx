@@ -455,7 +455,9 @@ function SessionView({
                   <td colSpan={4} className="px-6 py-4 bg-sand-50 border-b border-sand-200">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {sessionRecords.map((r) => (
-                        <RecordEditor key={r.id} record={r} onSaved={onFieldSaved} />
+                        <div key={r.id} id={`record-${r.id}`}>
+                          <RecordEditor record={r} onSaved={onFieldSaved} />
+                        </div>
                       ))}
                     </div>
                     {sessionRecords.some((r) => r.status === 'draft') && (
@@ -613,18 +615,39 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [load]);
 
-  // Auto-expand record if navigated via hash (only on first load)
+  // Auto-expand and scroll to record when navigated via hash (e.g., /dashboard#record-id)
   useEffect(() => {
+    if (loading || records.length === 0) return;
     const hash = window.location.hash.slice(1);
-    if (hash) setExpandedId(hash);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!hash) return;
 
-  useEffect(() => {
-    if (!expandedId) return;
+    // The hash is a record ID. Find the record to get its session_id.
+    const targetRecord = records.find((r) => r.id === hash);
+    if (targetRecord && view === 'session') {
+      // In session view, expand the session that contains this record
+      setExpandedId(targetRecord.session_id);
+    } else if (targetRecord && view === 'library') {
+      // In library view, records are always shown — just scroll
+      setExpandedId(hash);
+    } else {
+      // Fallback: try using hash directly (could be a session_id)
+      setExpandedId(hash);
+    }
+
+    // Scroll to the record element after a brief delay for rendering
     requestAnimationFrame(() => {
-      document.getElementById(`row-${expandedId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(() => {
+        const el = document.getElementById(`row-${hash}`) || document.getElementById(`record-${hash}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Add a brief highlight effect
+        if (el) {
+          el.classList.add('ring-2', 'ring-brand-fig/40', 'rounded-lg');
+          setTimeout(() => el.classList.remove('ring-2', 'ring-brand-fig/40', 'rounded-lg'), 2000);
+        }
+      }, 100);
     });
-  }, [expandedId]);
+  }, [loading, records, view]); // eslint-disable-line react-hooks/exhaustive-deps
+
 
   const handleConfirm = async (recordId: string) => {
     try {
