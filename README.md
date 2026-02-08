@@ -132,7 +132,7 @@ python3 -m pytest evals/tasks/validation/ -v -m network
 - [x] Chat interface (token streaming, tool progress indicators with elapsed timers, model selector)
 - [x] Dashboard (session view + library view, inline editing, schema placeholders)
 - [x] Streaming & UX polish (terracotta theme, live health indicator, shimmer animations)
-- [x] Eval suite (53 deterministic tests + LLM-graded + network tests)
+- [x] Eval suite (64 deterministic tests + LLM-graded + network tests)
 - [x] Auto-trigger registry lookups when relevant fields are extracted
 - [x] Validation feedback loop into agent conversation for proactive prompting
 - [x] Deeper schema validation via `aind-data-schema` Pydantic models

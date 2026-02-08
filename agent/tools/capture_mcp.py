@@ -96,8 +96,8 @@ def _extract_registry_queries(record_type: str, data: dict[str, Any]) -> dict[st
         # Genotype → MGI + NCBI
         genotype = data.get("genotype")
         if genotype and isinstance(genotype, str) and len(genotype) > 2:
-            # Split composite genotypes like "Ai14;Slc17a7-Cre"
-            parts = re.split(r"[;/×x]\s*", genotype)
+            # Split composite genotypes like "Ai14;Slc17a7-Cre" or "Emx1-Cre/Ai94"
+            parts = re.split(r"[;/×]\s*", genotype)
             for part in parts:
                 part = part.strip()
                 if part and len(part) > 2:

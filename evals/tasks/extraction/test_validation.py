@@ -1,7 +1,10 @@
-"""Tests for schema validation logic."""
+"""Tests for schema validation logic, validation feedback, and registry lookup extraction."""
+
+import pytest
 
 from agent.schema_info import SCHEMA_AVAILABLE, SCHEMA_MODELS, KNOWN_FIELDS, VALID_MODALITIES as SCHEMA_MODALITIES, VALID_SPECIES as SCHEMA_SPECIES, VALID_SEX as SCHEMA_SEX
 from agent.validation import validate_record, validate_metadata, VALID_SEX, VALID_MODALITIES
+from agent.tools.capture_mcp import _format_validation_summary, _extract_registry_queries, _format_registry_summary
 
 
 class TestRequiredFields:
@@ -257,3 +260,182 @@ class TestUnknownFields:
             result = validate_record(record_type, {"totally_bogus_xyz": "x"})
             warnings = [i for i in result.issues if i.severity == "warning" and "totally_bogus_xyz" in i.message]
             assert len(warnings) == 1, f"Expected unknown-field warning for '{record_type}'"
+
+
+class TestValidationSummaryFormatter:
+    """Test _format_validation_summary output for agent feedback."""
+
+    def test_valid_record_summary(self):
+        v = {"status": "valid", "errors": [], "warnings": [], "missing_required": []}
+        summary = _format_validation_summary(v)
+        assert "VALIDATION PASSED" in summary
+
+    def test_error_summary(self):
+        v = {
+            "status": "errors",
+            "errors": [{"field": "sex", "message": "Invalid sex 'Unknown'", "severity": "error"}],
+            "warnings": [],
+            "missing_required": [],
+        }
+        summary = _format_validation_summary(v)
+        assert "VALIDATION ERRORS" in summary
+        assert "sex" in summary
+        assert "Invalid sex" in summary
+        assert "MUST report" in summary
+
+    def test_warning_summary(self):
+        v = {
+            "status": "warnings",
+            "errors": [],
+            "warnings": [{"field": "bogus", "message": "Unknown field 'bogus'", "severity": "warning"}],
+            "missing_required": [],
+        }
+        summary = _format_validation_summary(v)
+        assert "WARNINGS" in summary
+        assert "bogus" in summary
+
+    def test_missing_required_summary(self):
+        v = {"status": "warnings", "errors": [], "warnings": [], "missing_required": ["subject_id", "sex"]}
+        summary = _format_validation_summary(v)
+        assert "MISSING REQUIRED" in summary
+        assert "subject_id" in summary
+        assert "sex" in summary
+
+    def test_combined_errors_and_warnings(self):
+        v = {
+            "status": "errors",
+            "errors": [{"field": "sex", "message": "Invalid", "severity": "error"}],
+            "warnings": [{"field": "foo", "message": "Unknown", "severity": "warning"}],
+            "missing_required": ["modality"],
+        }
+        summary = _format_validation_summary(v)
+        assert "VALIDATION ERRORS" in summary
+        assert "MISSING REQUIRED" in summary
+        assert "WARNINGS" in summary
+
+
+class TestRegistryQueryExtraction:
+    """Test _extract_registry_queries for identifying lookup-worthy fields."""
+
+    def test_subject_genotype_single(self):
+        queries = _extract_registry_queries("subject", {"genotype": "Ai14"})
+        assert "mgi" in queries
+        assert "Ai14" in queries["mgi"]
+        assert "ncbi_gene" in queries
+        assert "Ai14" in queries["ncbi_gene"]
+
+    def test_subject_genotype_composite(self):
+        """Composite genotypes split on ; should produce separate queries."""
+        queries = _extract_registry_queries("subject", {"genotype": "Ai14;Slc17a7-Cre"})
+        assert queries["mgi"] == ["Ai14", "Slc17a7-Cre"]
+        assert queries["ncbi_gene"] == ["Ai14", "Slc17a7-Cre"]
+
+    def test_subject_genotype_slash_separator(self):
+        queries = _extract_registry_queries("subject", {"genotype": "Emx1-Cre/Ai94"})
+        assert "Emx1-Cre" in queries["mgi"]
+        assert "Ai94" in queries["mgi"]
+
+    def test_subject_no_genotype(self):
+        queries = _extract_registry_queries("subject", {"subject_id": "123", "sex": "Male"})
+        assert queries == {}
+
+    def test_subject_short_genotype_ignored(self):
+        """Genotype strings <= 2 chars should be ignored."""
+        queries = _extract_registry_queries("subject", {"genotype": "wt"})
+        assert queries == {}
+
+    def test_subject_alleles(self):
+        queries = _extract_registry_queries("subject", {
+            "alleles": [{"name": "Ai14"}, {"name": "Slc17a7-Cre"}]
+        })
+        assert "mgi" in queries
+        assert "Ai14" in queries["mgi"]
+        assert "Slc17a7-Cre" in queries["mgi"]
+
+    def test_procedures_nested_plasmid(self):
+        """Plasmid names nested inside subject_procedures should be found."""
+        queries = _extract_registry_queries("procedures", {
+            "subject_procedures": [{
+                "injection_materials": [{"name": "pAAV-EF1a-DIO-hChR2-EYFP"}],
+            }]
+        })
+        assert "addgene" in queries
+        assert "pAAV-EF1a-DIO-hChR2-EYFP" in queries["addgene"]
+
+    def test_procedures_catalog_number(self):
+        """Addgene catalog numbers (4-6 digits) should be extracted."""
+        queries = _extract_registry_queries("procedures", {
+            "injection_materials": "pAAV-EF1a (Addgene 26973)"
+        })
+        assert "addgene" in queries
+        assert "26973" in queries["addgene"]
+
+    def test_procedures_top_level_materials(self):
+        queries = _extract_registry_queries("procedures", {
+            "injection_materials": "pCAG-Cre into cortex"
+        })
+        assert "addgene" in queries
+        assert "pCAG-Cre" in queries["addgene"]
+
+    def test_procedures_no_plasmid(self):
+        """Procedures without plasmid-like fields should produce no queries."""
+        queries = _extract_registry_queries("procedures", {
+            "procedure_type": "Craniotomy",
+            "coordinates": {"x": 1.0, "y": 2.0},
+        })
+        assert queries == {}
+
+    def test_session_no_queries(self):
+        queries = _extract_registry_queries("session", {"session_start_time": "2025-01-01"})
+        assert queries == {}
+
+    def test_data_description_no_queries(self):
+        queries = _extract_registry_queries("data_description", {"project_name": "Test"})
+        assert queries == {}
+
+    def test_queries_deduplicated(self):
+        """Duplicate query terms should be removed."""
+        queries = _extract_registry_queries("procedures", {
+            "subject_procedures": [
+                {"injection_materials": [{"name": "pAAV-EF1a"}]},
+                {"injection_materials": [{"name": "pAAV-EF1a"}]},
+            ]
+        })
+        assert queries["addgene"].count("pAAV-EF1a") == 1
+
+
+class TestRegistrySummaryFormatter:
+    """Test _format_registry_summary output."""
+
+    def test_empty_results(self):
+        assert _format_registry_summary([]) == ""
+
+    def test_found_result_with_url(self):
+        results = [{"registry": "mgi", "query": "Ai14", "found": True, "url": "https://mgi.org/Ai14"}]
+        summary = _format_registry_summary(results)
+        assert "REGISTRY LOOKUPS" in summary
+        assert "FOUND" in summary
+        assert "Ai14" in summary
+
+    def test_not_found_result(self):
+        results = [{"registry": "ncbi_gene", "query": "FakeGene", "found": False}]
+        summary = _format_registry_summary(results)
+        assert "NOT FOUND" in summary
+        assert "FakeGene" in summary
+
+    def test_error_result(self):
+        results = [{"registry": "addgene", "query": "pAAV", "error": "timeout"}]
+        summary = _format_registry_summary(results)
+        assert "failed" in summary
+        assert "timeout" in summary
+
+    def test_ncbi_gene_result_with_details(self):
+        results = [{
+            "registry": "ncbi_gene",
+            "query": "Slc17a7",
+            "found": True,
+            "results": [{"symbol": "Slc17a7", "description": "vesicular glutamate transporter", "url": "https://ncbi.nlm.nih.gov/gene/140919"}],
+        }]
+        summary = _format_registry_summary(results)
+        assert "Slc17a7" in summary
+        assert "vesicular glutamate" in summary
