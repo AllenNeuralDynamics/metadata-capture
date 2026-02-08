@@ -35,7 +35,7 @@ Covers:
 
 **Grader:** Deterministic field matching against SQLite.
 
-### 2. Conversation (4 tests) — LLM Judge
+### 2. Conversation (11 tests) — LLM Judge
 
 Tests the full `chat()` function and grades responses with an LLM rubric (Sonnet 4.5). Requires `ANTHROPIC_API_KEY`.
 
@@ -45,6 +45,14 @@ Tests the full `chat()` function and grades responses with an LLM rubric (Sonnet
 | Multi-turn progressive | Fields accumulate correctly across turns |
 | Ambiguous modality | Asks clarifying questions |
 | Protocol + coordinates | Captures multiple fields from one message |
+| Validation: invalid sex | Flags invalid value, suggests corrections |
+| Validation: invalid modality | Flags xray as invalid, lists valid options |
+| Validation: clean pass | No false alarms when all fields are valid |
+| Registry: genotype lookup | Shares MGI/NCBI results for alleles |
+| Registry: plasmid lookup | Shares Addgene results for injection materials |
+| Registry: session (no lookup) | Avoids irrelevant registry mentions |
+| Unknown fields flagged | Warns about non-schema fields |
+| Context: modality → data_description | Creates correct record type |
 
 **Grader:** `graders/llm_judge.py::grade_conversation` — rubric-based scoring (1-5) on accuracy, completeness, proactiveness, tone. Pass threshold: average >= 3.5.
 
@@ -70,6 +78,22 @@ Tests the full HTTP pipeline: API → agent → extraction → SQLite → retrie
 | Session isolation | Different session_ids have separate drafts |
 | Confirm draft | POST confirm changes status |
 
+### 5. Agent (10 tests) — End-to-End Agent Evals
+
+Sends prompts to the live agent via `/chat` SSE, then grades both the DB outcome (deterministic) and the response text (LLM judge). Requires `ANTHROPIC_API_KEY` and network access.
+
+```bash
+python3 -m pytest evals/tasks/agent/ -v -m llm
+```
+
+| Category | Tests | What's verified |
+|----------|-------|-----------------|
+| Schema validation | 4 | Agent flags invalid sex/modality, maps SLAP→slap2, stays silent on clean records |
+| Registry lookups | 3 | Agent shares MGI/NCBI results for genotypes, Addgene for plasmids, skips for sessions |
+| Context-aware | 3 | Modality → data_description, subject reuse across messages, unknown field warnings |
+
+**Graders:** Deterministic DB state checks (record exists, correct type/fields) + LLM rubric scoring on response quality.
+
 ## Structure
 
 ```
@@ -79,11 +103,13 @@ evals/
 │   ├── deterministic.py        # Field match, absence check, partial credit
 │   └── llm_judge.py            # LLM-as-judge with rubric scoring
 ├── tasks/
+│   ├── agent/
+│   │   └── test_agent_evals.py # End-to-end agent evals (10 tests, LLM + deterministic)
 │   ├── extraction/
 │   │   ├── cases.yaml              # ~40 extraction test cases
 │   │   └── test_agent_extraction.py # Agent accuracy tests (LLM)
 │   ├── conversation/
-│   │   ├── cases.yaml          # 4 LLM-graded cases
+│   │   ├── cases.yaml          # 11 LLM-graded cases
 │   │   └── test_conversation.py
 │   ├── validation/
 │   │   ├── cases.yaml          # 8 registry cases

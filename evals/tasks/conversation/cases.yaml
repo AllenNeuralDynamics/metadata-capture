@@ -72,3 +72,125 @@
     accuracy: "Did the agent correctly capture all fields: subject ID, sex, modality, protocol ID, coordinates (1.5, -2.3), and section thickness (50um)?"
     completeness: "Were all the details from the user's message reflected in the response?"
     formatting: "Was the metadata presented clearly and in a structured format?"
+
+# --- Validation feedback cases ---
+
+- id: validation_flags_invalid_sex
+  description: Agent flags that 'unknown' is not a valid sex value and suggests corrections
+  type: conversation
+  transcript: |
+    USER: Subject 887766, sex is unknown
+    ASSISTANT: I've captured the subject metadata:
+    - Subject ID: 887766
+
+    However, I noticed a validation issue: "unknown" is not a valid value for the sex field in the AIND schema. The valid options are **Male** or **Female**. Could you clarify the sex of this subject so I can update the record?
+  rubric:
+    validation_flagging: "Did the agent flag that 'unknown' is not a valid sex value and suggest Male or Female as valid options?"
+    record_creation: "Did the agent still create/capture the subject record with ID 887766 despite the validation issue?"
+    helpfulness: "Did the agent proactively ask the user to correct the invalid value?"
+
+- id: validation_flags_invalid_modality
+  description: Agent flags that 'xray' is not a valid AIND modality
+  type: conversation
+  transcript: |
+    USER: Data description, modality is xray, project TestProject
+    ASSISTANT: I've captured the data description metadata:
+    - Project: TestProject
+
+    I found a validation issue: "xray" is not a recognized modality in the AIND schema. Valid modalities include ecephys, fib, fmost, icephys, ISI, merfish, MRI, behavior_videos, confocal, dispim, hsfp, mri, pophys, slap2, smartspim, and others. Could you check the modality and let me know the correct value?
+  rubric:
+    validation_flagging: "Did the agent flag that 'xray' is not a valid AIND modality and list some valid options?"
+    record_creation: "Did the agent capture the project name (TestProject) in a data_description record?"
+    knowledge: "Did the agent demonstrate knowledge of valid AIND modalities?"
+
+- id: clean_validation_passes_silently
+  description: Agent does NOT mention validation when all fields are valid
+  type: conversation
+  transcript: |
+    USER: Subject 445566 is a female Mus musculus
+    ASSISTANT: I've captured the subject metadata:
+    - Subject ID: 445566
+    - Sex: Female
+    - Species: Mus musculus
+
+    Would you like to add any additional details such as genotype, breeding group, or other information?
+  rubric:
+    no_false_alarms: "The agent should NOT mention validation errors or warnings since all fields are valid (Female, Mus musculus). Did it avoid raising unnecessary validation concerns?"
+    accuracy: "Did the agent correctly capture subject ID (445566), sex (Female), and species (Mus musculus)?"
+    helpfulness: "Did the agent ask about additional relevant fields without bringing up validation issues?"
+
+# --- Registry lookup cases ---
+
+- id: genotype_triggers_registry_lookup
+  description: Agent mentions MGI/NCBI registry results for genotype alleles
+  type: conversation
+  transcript: |
+    USER: Subject 556677, female mouse, genotype Ai14;Slc17a7-Cre
+    ASSISTANT: I've captured the subject metadata:
+    - Subject ID: 556677
+    - Sex: Female
+    - Species: Mus musculus
+    - Genotype: Ai14;Slc17a7-Cre
+
+    I looked up the genotype alleles in external registries:
+    - **Ai14**: Found in MGI — this is a Cre-dependent tdTomato reporter allele (Gt(ROSA)26Sor-tm14).
+    - **Slc17a7-Cre**: Found in MGI — this targets Vglut1-expressing glutamatergic neurons.
+
+    Would you like to add any procedures or session details?
+  rubric:
+    registry_results: "Did the agent mention results from external registries (MGI, NCBI Gene) for the alleles Ai14 and Slc17a7-Cre?"
+    accuracy: "Did the agent correctly capture the subject ID (556677), sex (Female), and genotype?"
+    proactivity: "Did the agent automatically look up the genotype without being asked?"
+
+- id: plasmid_triggers_addgene_lookup
+  description: Agent mentions Addgene results for injection plasmids
+  type: conversation
+  transcript: |
+    USER: Injected pAAV-EF1a-DIO-hChR2 into VISp of mouse 100001
+    ASSISTANT: I've captured the injection procedure:
+    - Subject ID: 100001
+    - Injection material: pAAV-EF1a-DIO-hChR2
+    - Target area: VISp
+
+    I searched Addgene for the plasmid and found a match:
+    - **pAAV-EF1a-DIO-hChR2(H134R)-EYFP**: Addgene catalog #20298, a Cre-dependent channelrhodopsin construct commonly used for optogenetic activation.
+
+    Would you like to add injection coordinates, volume, or other procedure details?
+  rubric:
+    registry_results: "Did the agent mention Addgene search results for the plasmid pAAV-EF1a-DIO-hChR2?"
+    accuracy: "Did the agent capture the injection target (VISp) and subject (100001)?"
+    proactivity: "Did the agent automatically look up the plasmid without being asked?"
+
+- id: session_metadata_no_registry
+  description: Agent does NOT mention registries for plain session metadata
+  type: conversation
+  transcript: |
+    USER: Session started at 9am, ended at 11am, rig EPHYS-01
+    ASSISTANT: I've captured the session metadata:
+    - Session start time: 9:00 AM
+    - Session end time: 11:00 AM
+    - Rig ID: EPHYS-01
+
+    Would you like to add the subject, modality, or project name for this session?
+  rubric:
+    no_registry_mentions: "The agent should NOT mention Addgene, MGI, NCBI, or any external registry lookups since there are no genotypes or plasmids. Did the agent avoid irrelevant registry mentions?"
+    accuracy: "Did the agent correctly capture the session times (9am, 11am) and rig ID (EPHYS-01)?"
+    helpfulness: "Did the agent ask about relevant missing fields like subject, modality, or project?"
+
+# --- Context-aware behavior cases ---
+
+- id: unknown_fields_flagged
+  description: Agent flags fields not in the AIND schema
+  type: conversation
+  transcript: |
+    USER: Subject 887766, favorite color is blue, nickname is Squeaky
+    ASSISTANT: I've captured the subject metadata:
+    - Subject ID: 887766
+
+    I noticed that "favorite_color" and "nickname" are not standard fields in the AIND subject schema. These fields will be stored but may not be recognized by downstream systems. The standard subject fields include sex, species, genotype, breeding_group, and others.
+
+    Would you like to add any of the standard fields instead?
+  rubric:
+    unknown_field_flagging: "Did the agent flag that 'favorite_color' and 'nickname' are not standard AIND subject schema fields?"
+    subject_capture: "Did the agent still capture subject ID 887766 despite the unknown fields?"
+    guidance: "Did the agent mention what the standard fields are or suggest using them instead?"

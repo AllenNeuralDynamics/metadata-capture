@@ -118,6 +118,9 @@ python3 -m pytest evals/ -x -q -m "not llm and not network"
 # Run LLM-graded conversation tests (requires ANTHROPIC_API_KEY)
 python3 -m pytest evals/tasks/conversation/ -v -m llm
 
+# Run end-to-end agent evals (requires ANTHROPIC_API_KEY + network)
+python3 -m pytest evals/tasks/agent/ -v -m llm
+
 # Run registry validation tests (requires network)
 python3 -m pytest evals/tasks/validation/ -v -m network
 ```
@@ -132,7 +135,7 @@ python3 -m pytest evals/tasks/validation/ -v -m network
 - [x] Chat interface (token streaming, tool progress indicators with elapsed timers, model selector)
 - [x] Dashboard (session view + library view, inline editing, schema placeholders)
 - [x] Streaming & UX polish (terracotta theme, live health indicator, shimmer animations)
-- [x] Eval suite (64 deterministic tests + LLM-graded + network tests)
+- [x] Eval suite (64 deterministic + 11 LLM-graded transcripts + 10 end-to-end agent evals + network tests)
 - [x] Auto-trigger registry lookups when relevant fields are extracted
 - [x] Validation feedback loop into agent conversation for proactive prompting
 - [x] Deeper schema validation via `aind-data-schema` Pydantic models

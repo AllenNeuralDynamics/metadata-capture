@@ -100,7 +100,7 @@ metadata-capture/
 │   │   └── lib/api.ts              # API client: chat (SSE + AbortSignal), metadata CRUD, sessions
 │   └── package.json
 │
-├── evals/                          # Comprehensive eval suite (see evals/README.md)
+├── evals/                          # Eval suite: 64 deterministic + 11 LLM-graded + 10 agent e2e
 │
 ├── aind-metadata-mcp/              # MCP server (21 tools, moved into project)
 ```
@@ -226,7 +226,8 @@ npm run dev                                                # auto-reloads on fil
 
 # Run evals (from metadata-capture/ directory)
 python3 -m pytest evals/ -x -q                                    # deterministic only
-python3 -m pytest evals/tasks/conversation/ -v -m llm              # LLM-graded (needs ANTHROPIC_API_KEY)
+python3 -m pytest evals/tasks/conversation/ -v -m llm              # LLM-graded transcripts (needs ANTHROPIC_API_KEY)
+python3 -m pytest evals/tasks/agent/ -v -m llm                     # end-to-end agent evals (needs ANTHROPIC_API_KEY)
 python3 -m pytest evals/tasks/validation/ -v -m network            # registry lookups (needs network)
 ```
 
