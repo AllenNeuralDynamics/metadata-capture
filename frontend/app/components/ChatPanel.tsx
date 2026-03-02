@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { sendChatMessage, fetchMessages, fetchModels, uploadFile, getUploadUrl, ChatMessage, MessageAttachment } from '../lib/api';
+import { sendChatMessage, fetchMessages, fetchModels, uploadFile, getUploadUrl, MessageAttachment } from '../lib/api';
 import ArtifactModal, { ArtifactSource } from './ArtifactModal';
 
 // ---------------------------------------------------------------------------
@@ -318,9 +318,10 @@ function restoreMessages(sessionId: string, backendMessages: StructuredMessage[]
 interface ChatPanelProps {
   sessionId: string | null;
   onSessionChange: (sessionId: string) => void;
+  agentOnline: boolean;
 }
 
-export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps) {
+export default function ChatPanel({ sessionId, onSessionChange, agentOnline }: ChatPanelProps) {
   const [messages, setMessages] = useState<StructuredMessage[]>([]);
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -405,6 +406,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
   };
 
   const handlePaste = (e: React.ClipboardEvent) => {
+    if (!agentOnline) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     const imageFiles: File[] = [];
@@ -426,6 +428,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    if (!agentOnline) return;
     setIsDragging(true);
   };
 
@@ -437,6 +440,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    if (!agentOnline) return;
     if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   };
 
@@ -501,7 +505,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
 
   const handleSend = async () => {
     const trimmed = input.trim();
-    if ((!trimmed && pendingFiles.length === 0) || isStreaming) return;
+    if ((!trimmed && pendingFiles.length === 0) || isStreaming || !agentOnline) return;
 
     setError(null);
 
@@ -846,15 +850,20 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
                        focus:outline-none focus:ring-2 focus:ring-brand-fig/30 focus:border-brand-fig/50
                        disabled:bg-sand-50 disabled:text-sand-400
                        placeholder:text-sand-400"
-            disabled={isStreaming}
+            disabled={isStreaming || !agentOnline}
           />
+          {!agentOnline && (
+            <div className="absolute inset-0 rounded-2xl flex items-center justify-center bg-sand-50/80 pointer-events-none">
+              <span className="text-sm text-sand-500 font-medium">Agent is starting up&hellip;</span>
+            </div>
+          )}
           {/* Model selector */}
           {availableModels.length > 0 && (
             <div className="absolute left-3 bottom-3">
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                disabled={isStreaming}
+                disabled={isStreaming || !agentOnline}
                 className="appearance-none text-xs text-sand-500 bg-transparent
                            hover:text-sand-700 focus:text-sand-700 focus:outline-none
                            cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed
@@ -872,7 +881,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
           )}
           <div className="absolute right-3 bottom-3 flex items-center gap-1.5">
             {/* Paperclip — attach files */}
-            {!isStreaming && (
+            {!isStreaming && agentOnline && (
               <button
                 onClick={() => fileInputRef.current?.click()}
                 className="w-9 h-9 rounded-xl border border-sand-200
@@ -886,7 +895,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
               </button>
             )}
             {/* Microphone — speech-to-text */}
-            {!isStreaming && speechSupported && (
+            {!isStreaming && agentOnline && speechSupported && (
               <button
                 onClick={toggleListening}
                 className={`w-9 h-9 rounded-xl border flex items-center justify-center transition-colors ${
@@ -916,7 +925,7 @@ export default function ChatPanel({ sessionId, onSessionChange }: ChatPanelProps
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() && pendingFiles.length === 0}
+                disabled={(!input.trim() && pendingFiles.length === 0) || !agentOnline}
                 className="w-9 h-9 rounded-xl bg-brand-fig
                            flex items-center justify-center text-white
                            hover:bg-brand-magenta-600 transition-colors

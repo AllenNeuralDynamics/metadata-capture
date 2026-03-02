@@ -22,6 +22,12 @@ ALLOWED_CONTENT_TYPES = {
 } | SPREADSHEET_CONTENT_TYPES
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
+UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
+ALLOWED_CONTENT_TYPES = {
+    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
+}
+MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
+
 # Load environment variables from .env file
 load_dotenv()
 
