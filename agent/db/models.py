@@ -1,6 +1,72 @@
-"""SQL table definitions for the metadata capture system (PostgreSQL)."""
+"""SQL table definitions for the metadata capture system.
 
-METADATA_RECORDS_TABLE = """
+Provides both SQLite and PostgreSQL DDL variants.
+"""
+
+# ---------------------------------------------------------------------------
+# SQLite DDL
+# ---------------------------------------------------------------------------
+
+SQLITE_TABLES = [
+    """
+CREATE TABLE IF NOT EXISTS metadata_records (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    record_type TEXT NOT NULL
+        CHECK (record_type IN (
+            'subject', 'procedures', 'instrument', 'rig',
+            'data_description', 'acquisition', 'session',
+            'processing', 'quality_control'
+        )),
+    category TEXT NOT NULL
+        CHECK (category IN ('shared', 'asset')),
+    name TEXT,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'validated', 'confirmed', 'error')),
+    validation_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+""",
+    """
+CREATE TABLE IF NOT EXISTS record_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL REFERENCES metadata_records(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL REFERENCES metadata_records(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(source_id, target_id)
+);
+""",
+    """
+CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    attachments_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+""",
+    """
+CREATE TABLE IF NOT EXISTS uploads (
+    id TEXT PRIMARY KEY,
+    original_filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    session_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+""",
+]
+
+# ---------------------------------------------------------------------------
+# PostgreSQL DDL
+# ---------------------------------------------------------------------------
+
+PG_TABLES = [
+    """
 CREATE TABLE IF NOT EXISTS metadata_records (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -20,9 +86,8 @@ CREATE TABLE IF NOT EXISTS metadata_records (
     created_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT,
     updated_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT
 );
-"""
-
-RECORD_LINKS_TABLE = """
+""",
+    """
 CREATE TABLE IF NOT EXISTS record_links (
     id SERIAL PRIMARY KEY,
     source_id TEXT NOT NULL REFERENCES metadata_records(id) ON DELETE CASCADE,
@@ -30,9 +95,8 @@ CREATE TABLE IF NOT EXISTS record_links (
     created_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT,
     UNIQUE(source_id, target_id)
 );
-"""
-
-CONVERSATIONS_TABLE = """
+""",
+    """
 CREATE TABLE IF NOT EXISTS conversations (
     id SERIAL PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -41,9 +105,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     attachments_json TEXT,
     created_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT
 );
-"""
-
-UPLOADS_TABLE = """
+""",
+    """
 CREATE TABLE IF NOT EXISTS uploads (
     id TEXT PRIMARY KEY,
     original_filename TEXT NOT NULL,
@@ -53,7 +116,12 @@ CREATE TABLE IF NOT EXISTS uploads (
     session_id TEXT,
     created_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT
 );
-"""
+""",
+]
+
+# ---------------------------------------------------------------------------
+# Indexes (shared syntax, compatible with both backends)
+# ---------------------------------------------------------------------------
 
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_records_session ON metadata_records(session_id)",
@@ -66,7 +134,9 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_uploads_session ON uploads(session_id)",
 ]
 
-ALL_TABLES = [METADATA_RECORDS_TABLE, RECORD_LINKS_TABLE, CONVERSATIONS_TABLE, UPLOADS_TABLE]
+# ---------------------------------------------------------------------------
+# Category mapping
+# ---------------------------------------------------------------------------
 
 CATEGORY_MAP = {
     "subject": "shared",

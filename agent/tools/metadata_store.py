@@ -1,4 +1,4 @@
-"""Tools for persisting and retrieving metadata records in PostgreSQL."""
+"""Tools for persisting and retrieving metadata records."""
 
 import json
 import logging
@@ -26,8 +26,8 @@ def _parse_json(value: str | None) -> Any:
         return value
 
 
-def _row_to_dict(row) -> dict[str, Any]:
-    """Convert an asyncpg Record to a plain dict, parsing JSON columns."""
+def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """Parse JSON columns in a row dict."""
     d = dict(row)
     if d.get("data_json"):
         d["data_json"] = _parse_json(d["data_json"])
@@ -88,17 +88,17 @@ async def create_record(
     if record_type not in VALID_RECORD_TYPES:
         raise ValueError(f"Invalid record_type: {record_type}")
 
-    pool = await get_db()
+    db = await get_db()
     record_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     category = CATEGORY_MAP[record_type]
     display_name = name or _auto_name(record_type, data)
 
-    await pool.execute(
+    await db.execute(
         """INSERT INTO metadata_records
            (id, session_id, record_type, category, name, data_json, status, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8)""",
-        record_id, session_id, record_type, category, display_name, _serialize(data), now, now,
+           VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)""",
+        (record_id, session_id, record_type, category, display_name, _serialize(data), now, now),
     )
     record = await get_record(record_id)
     assert record is not None, f"Record {record_id} not found after insert"
@@ -107,8 +107,8 @@ async def create_record(
 
 async def get_record(record_id: str) -> dict[str, Any] | None:
     """Get a single record by ID."""
-    pool = await get_db()
-    row = await pool.fetchrow("SELECT * FROM metadata_records WHERE id = $1", record_id)
+    db = await get_db()
+    row = await db.fetchrow("SELECT * FROM metadata_records WHERE id = ?", (record_id,))
     return _row_to_dict(row) if row else None
 
 
@@ -118,7 +118,7 @@ async def update_record(
     name: str | None = None,
 ) -> dict[str, Any] | None:
     """Update a record's data and/or name. Merges data with existing."""
-    pool = await get_db()
+    db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
 
     existing = await get_record(record_id)
@@ -132,22 +132,22 @@ async def update_record(
             merged_data = {**merged_data, **data}
         else:
             merged_data = data
-        await pool.execute(
-            "UPDATE metadata_records SET data_json = $1, updated_at = $2 WHERE id = $3",
-            _serialize(merged_data), now, record_id,
+        await db.execute(
+            "UPDATE metadata_records SET data_json = ?, updated_at = ? WHERE id = ?",
+            (_serialize(merged_data), now, record_id),
         )
 
     if name is not None:
-        await pool.execute(
-            "UPDATE metadata_records SET name = $1, updated_at = $2 WHERE id = $3",
-            name, now, record_id,
+        await db.execute(
+            "UPDATE metadata_records SET name = ?, updated_at = ? WHERE id = ?",
+            (name, now, record_id),
         )
     elif data is not None:
         auto = _auto_name(existing["record_type"], merged_data)
         if auto:
-            await pool.execute(
-                "UPDATE metadata_records SET name = $1, updated_at = $2 WHERE id = $3",
-                auto, now, record_id,
+            await db.execute(
+                "UPDATE metadata_records SET name = ?, updated_at = ? WHERE id = ?",
+                (auto, now, record_id),
             )
 
     return await get_record(record_id)
@@ -167,32 +167,32 @@ async def update_record_field(record_id: str, field: str, value: Any) -> dict[st
 
 async def update_record_validation(record_id: str, validation: dict[str, Any]) -> None:
     """Update a record's validation results."""
-    pool = await get_db()
+    db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
-    await pool.execute(
-        "UPDATE metadata_records SET validation_json = $1, updated_at = $2 WHERE id = $3",
-        _serialize(validation), now, record_id,
+    await db.execute(
+        "UPDATE metadata_records SET validation_json = ?, updated_at = ? WHERE id = ?",
+        (_serialize(validation), now, record_id),
     )
 
 
 async def confirm_record(record_id: str) -> dict[str, Any] | None:
     """Mark a record as confirmed."""
-    pool = await get_db()
+    db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
-    row = await pool.fetchrow("SELECT id FROM metadata_records WHERE id = $1", record_id)
+    row = await db.fetchrow("SELECT id FROM metadata_records WHERE id = ?", (record_id,))
     if row is None:
         return None
-    await pool.execute(
-        "UPDATE metadata_records SET status = 'confirmed', updated_at = $1 WHERE id = $2",
-        now, record_id,
+    await db.execute(
+        "UPDATE metadata_records SET status = 'confirmed', updated_at = ? WHERE id = ?",
+        (now, record_id),
     )
     return await get_record(record_id)
 
 
 async def delete_record(record_id: str) -> bool:
     """Delete a record and its links."""
-    pool = await get_db()
-    result = await pool.execute("DELETE FROM metadata_records WHERE id = $1", record_id)
+    db = await get_db()
+    result = await db.execute("DELETE FROM metadata_records WHERE id = ?", (record_id,))
     count = int(result.split()[-1]) if result else 0
     return count > 0
 
@@ -208,32 +208,27 @@ async def list_records(
     status: str | None = None,
 ) -> list[dict[str, Any]]:
     """List records with optional filters."""
-    pool = await get_db()
+    db = await get_db()
     clauses: list[str] = []
     params: list[Any] = []
-    idx = 1
 
     if record_type:
-        clauses.append(f"record_type = ${idx}")
+        clauses.append("record_type = ?")
         params.append(record_type)
-        idx += 1
     if category:
-        clauses.append(f"category = ${idx}")
+        clauses.append("category = ?")
         params.append(category)
-        idx += 1
     if session_id:
-        clauses.append(f"session_id = ${idx}")
+        clauses.append("session_id = ?")
         params.append(session_id)
-        idx += 1
     if status:
-        clauses.append(f"status = ${idx}")
+        clauses.append("status = ?")
         params.append(status)
-        idx += 1
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    rows = await pool.fetch(
+    rows = await db.fetch(
         f"SELECT * FROM metadata_records{where} ORDER BY created_at DESC",
-        *params,
+        params,
     )
     return [_row_to_dict(r) for r in rows]
 
@@ -244,28 +239,24 @@ async def find_records(
     category: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search records by type, category, and/or text query against name and data."""
-    pool = await get_db()
+    db = await get_db()
     clauses: list[str] = []
     params: list[Any] = []
-    idx = 1
 
     if record_type:
-        clauses.append(f"record_type = ${idx}")
+        clauses.append("record_type = ?")
         params.append(record_type)
-        idx += 1
     if category:
-        clauses.append(f"category = ${idx}")
+        clauses.append("category = ?")
         params.append(category)
-        idx += 1
     if query:
-        clauses.append(f"(name LIKE ${idx} OR data_json LIKE ${idx + 1})")
+        clauses.append("(name LIKE ? OR data_json LIKE ?)")
         params.extend([f"%{query}%", f"%{query}%"])
-        idx += 2
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    rows = await pool.fetch(
+    rows = await db.fetch(
         f"SELECT * FROM metadata_records{where} ORDER BY updated_at DESC LIMIT 50",
-        *params,
+        params,
     )
     return [_row_to_dict(r) for r in rows]
 
@@ -281,12 +272,12 @@ async def get_session_records(session_id: str) -> list[dict[str, Any]]:
 
 async def link_records(source_id: str, target_id: str) -> dict[str, Any]:
     """Create a link between two records. Returns link info."""
-    pool = await get_db()
+    db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
     try:
-        await pool.execute(
-            "INSERT INTO record_links (source_id, target_id, created_at) VALUES ($1, $2, $3)",
-            source_id, target_id, now,
+        await db.execute(
+            "INSERT INTO record_links (source_id, target_id, created_at) VALUES (?, ?, ?)",
+            (source_id, target_id, now),
         )
     except Exception:
         pass
@@ -295,22 +286,22 @@ async def link_records(source_id: str, target_id: str) -> dict[str, Any]:
 
 async def get_linked_records(record_id: str) -> list[dict[str, Any]]:
     """Get all records linked to a given record (in either direction)."""
-    pool = await get_db()
-    rows = await pool.fetch(
+    db = await get_db()
+    rows = await db.fetch(
         """SELECT m.* FROM metadata_records m
-           INNER JOIN record_links l ON (m.id = l.target_id AND l.source_id = $1)
-                                     OR (m.id = l.source_id AND l.target_id = $2)""",
-        record_id, record_id,
+           INNER JOIN record_links l ON (m.id = l.target_id AND l.source_id = ?)
+                                     OR (m.id = l.source_id AND l.target_id = ?)""",
+        (record_id, record_id),
     )
     return [_row_to_dict(r) for r in rows]
 
 
 async def unlink_records(source_id: str, target_id: str) -> bool:
     """Remove a link between two records."""
-    pool = await get_db()
-    result = await pool.execute(
-        "DELETE FROM record_links WHERE (source_id = $1 AND target_id = $2) OR (source_id = $3 AND target_id = $4)",
-        source_id, target_id, target_id, source_id,
+    db = await get_db()
+    result = await db.execute(
+        "DELETE FROM record_links WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+        (source_id, target_id, target_id, source_id),
     )
     count = int(result.split()[-1]) if result else 0
     return count > 0
@@ -322,9 +313,9 @@ async def unlink_records(source_id: str, target_id: str) -> bool:
 
 async def delete_session(session_id: str) -> bool:
     """Delete all data for a session (conversations and records)."""
-    pool = await get_db()
-    r1 = await pool.execute("DELETE FROM conversations WHERE session_id = $1", session_id)
-    r2 = await pool.execute("DELETE FROM metadata_records WHERE session_id = $1", session_id)
+    db = await get_db()
+    r1 = await db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
+    r2 = await db.execute("DELETE FROM metadata_records WHERE session_id = ?", (session_id,))
     c1 = int(r1.split()[-1]) if r1 else 0
     c2 = int(r2.split()[-1]) if r2 else 0
     return c1 + c2 > 0
@@ -341,20 +332,20 @@ async def save_conversation_turn(
     attachments: list[dict] | None = None,
 ) -> None:
     """Persist a single conversation turn, optionally with attachment metadata."""
-    pool = await get_db()
+    db = await get_db()
     attachments_json = json.dumps(attachments) if attachments else None
-    await pool.execute(
-        "INSERT INTO conversations (session_id, role, content, attachments_json) VALUES ($1, $2, $3, $4)",
-        session_id, role, content, attachments_json,
+    await db.execute(
+        "INSERT INTO conversations (session_id, role, content, attachments_json) VALUES (?, ?, ?, ?)",
+        (session_id, role, content, attachments_json),
     )
 
 
 async def get_conversation_history(session_id: str) -> list[dict[str, Any]]:
     """Retrieve full conversation history for a session."""
-    pool = await get_db()
-    rows = await pool.fetch(
-        "SELECT role, content, attachments_json, created_at FROM conversations WHERE session_id = $1 ORDER BY created_at ASC",
-        session_id,
+    db = await get_db()
+    rows = await db.fetch(
+        "SELECT role, content, attachments_json, created_at FROM conversations WHERE session_id = ? ORDER BY created_at ASC",
+        (session_id,),
     )
     result = []
     for r in rows:
@@ -378,11 +369,11 @@ async def save_upload(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist an upload record."""
-    pool = await get_db()
-    await pool.execute(
+    db = await get_db()
+    await db.execute(
         """INSERT INTO uploads (id, original_filename, content_type, file_path, size_bytes, session_id)
-           VALUES ($1, $2, $3, $4, $5, $6)""",
-        upload_id, original_filename, content_type, file_path, size_bytes, session_id,
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (upload_id, original_filename, content_type, file_path, size_bytes, session_id),
     )
     return {
         "id": upload_id,
@@ -394,6 +385,6 @@ async def save_upload(
 
 async def get_upload(upload_id: str) -> dict[str, Any] | None:
     """Fetch an upload record by ID."""
-    pool = await get_db()
-    row = await pool.fetchrow("SELECT * FROM uploads WHERE id = $1", upload_id)
+    db = await get_db()
+    row = await db.fetchrow("SELECT * FROM uploads WHERE id = ?", (upload_id,))
     return dict(row) if row else None

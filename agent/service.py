@@ -366,8 +366,8 @@ async def get_sessions() -> list[dict[str, Any]]:
     """Get all sessions with their message counts."""
     from .db.database import get_db
 
-    pool = await get_db()
-    rows = await pool.fetch(
+    db = await get_db()
+    rows = await db.fetch(
         """
         SELECT
             session_id,

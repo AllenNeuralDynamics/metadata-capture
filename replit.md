@@ -6,7 +6,7 @@ A real-time metadata capture and validation platform for AIND (Allen Institute f
 ## Architecture
 - **Frontend**: Next.js 14 + TypeScript + Tailwind CSS (port 5000)
 - **Backend**: FastAPI Python API wrapping Claude Agent SDK (port 8001, localhost only)
-- **Database**: Replit PostgreSQL via asyncpg (connection pool)
+- **Database**: PostgreSQL (asyncpg) or SQLite (aiosqlite), auto-selected by environment
 - **MCP**: aind-metadata-mcp server (21 tools for AIND DB access)
 
 ## Project Structure
@@ -17,7 +17,7 @@ workspace/
 │   ├── run.py           # Uvicorn entry point (port 8001)
 │   ├── service.py       # Core agent logic
 │   ├── validation.py    # Schema validation
-│   ├── db/              # PostgreSQL database layer
+│   ├── db/              # Database layer (PG + SQLite backends)
 │   ├── prompts/         # System prompts
 │   └── tools/           # MCP tools (metadata_store, capture, registry)
 ├── frontend/            # Next.js frontend (port 5000)
@@ -47,14 +47,16 @@ workspace/
 - API calls proxied via Next.js rewrites (no direct backend access from browser)
 - API_BASE in frontend defaults to empty string (uses same origin + rewrites)
 - ANTHROPIC_API_KEY must be set as a Replit secret
-- DATABASE_URL is set automatically by Replit's PostgreSQL provisioning
+- DATABASE_URL: if set, uses PostgreSQL (asyncpg); if unset, falls back to SQLite (aiosqlite) at `agent/metadata.db`
+- METADATA_DB_DIR: optional override for SQLite database directory (defaults to agent/ package dir)
 
 ## Recent Changes
-- 2026-03-04: Migrated from SQLite to Replit PostgreSQL
-  - Replaced aiosqlite with asyncpg (connection pool, min=2, max=10)
-  - Converted all SQL queries from `?` placeholders to `$1, $2, ...` (PostgreSQL syntax)
+- 2026-03-04: Dual database backend (PostgreSQL + SQLite)
+  - `agent/db/database.py`: `Database` ABC with `PostgresDatabase` and `SQLiteDatabase` implementations
+  - Auto-selects backend: `DATABASE_URL` set → PostgreSQL (asyncpg pool), unset → SQLite (aiosqlite)
+  - All queries use `?` placeholders; PG backend auto-converts to `$1, $2, ...`
+  - `agent/db/models.py`: separate `PG_TABLES` and `SQLITE_TABLES` DDL lists, shared `CREATE_INDEXES`
   - Tables: metadata_records, record_links, conversations, uploads
-  - Database connection via DATABASE_URL environment variable
   - Added /artifacts rewrite to Next.js config
 - 2026-02-27: Added offline chat protection
   - Health check state lifted to page.tsx, passed as prop to Header and ChatPanel
