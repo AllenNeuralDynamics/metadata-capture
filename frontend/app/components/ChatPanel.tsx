@@ -336,6 +336,7 @@ export default function ChatPanel({ sessionId, onSessionChange, agentOnline }: C
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const speechBaseRef = useRef<string>(''); // input value at the moment the mic starts
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -467,30 +468,34 @@ export default function ChatPanel({ sessionId, onSessionChange, agentOnline }: C
     recognition.continuous = true;
     recognition.interimResults = true;
 
-    let finalTranscript = '';
+    // Snapshot whatever the user already typed; speech appends after this.
+    // Use a ref (not closure over `input`) so it survives React re-renders.
+    speechBaseRef.current = input;
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
+      // Rebuild the full transcript from scratch on every event.
+      // event.results is cumulative in continuous mode — it holds every
+      // segment since .start(), finalized or not. Looping from 0 each time
+      // with local vars is idempotent; a persistent accumulator would
+      // re-append finalized segments on every call (the duplication bug).
+      let final = '';
       let interim = '';
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
         if (result.isFinal) {
-          finalTranscript += result[0].transcript;
+          final += result[0].transcript;
         } else {
           interim += result[0].transcript;
         }
       }
-      setInput((prev) => {
-        const base = prev.replace(/\u200B.*$/, '').trimEnd();
-        const prefix = base ? base + ' ' : '';
-        return prefix + finalTranscript + (interim ? '\u200B' + interim : '');
-      });
+      const base = speechBaseRef.current;
+      const prefix = base ? base.trimEnd() + ' ' : '';
+      setInput(prefix + final + interim);
     };
 
     recognition.onend = () => {
       setIsListening(false);
       recognitionRef.current = null;
-      // Clean up zero-width space markers from interim results
-      setInput((prev) => prev.replace(/\u200B/g, ''));
     };
 
     recognition.onerror = () => {
