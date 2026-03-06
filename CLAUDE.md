@@ -15,7 +15,7 @@ Build a real-time metadata capture and validation platform for AIND using the **
 - **Dashboard** with session view + library view for reviewing and confirming metadata
 - **Local SQLite** for metadata storage (future: AIND MongoDB write access)
 
-Multi-modal (audio, image, video) deferred to post-MVP.
+Multi-modal (images, PDFs, text, spreadsheets, DOCX, audio, video) implemented via upload-time extraction pipeline.
 
 ---
 
@@ -80,9 +80,12 @@ metadata-capture/
 │   ├── prompts/
 │   │   └── system_prompt.py        # Context-aware AIND schema + granular record instructions
 │   ├── tools/
-│   │   ├── metadata_store.py       # SQLite CRUD: records, links, sessions, conversations
+│   │   ├── metadata_store.py       # SQLite CRUD: records, links, sessions, conversations, uploads
 │   │   ├── capture_mcp.py          # MCP tools: capture_metadata, find_records, link_records
-│   │   └── registry_lookup.py      # Addgene, NCBI, MGI API wrappers
+│   │   ├── registry_lookup.py      # Addgene, NCBI, MGI API wrappers
+│   │   ├── extractors.py           # Upload extraction registry: text/spreadsheet/docx/audio/video → ExtractedContent
+│   │   ├── transcribe.py           # whisper.cpp subprocess wrapper: ffmpeg → 16kHz WAV → whisper-cli → transcript
+│   │   └── spreadsheet.py          # CSV/XLSX parse → {columns, rows, total_rows}
 │   ├── db/
 │   │   ├── database.py             # Async SQLite (aiosqlite, WAL mode)
 │   │   └── models.py               # DDL: metadata_records + record_links + conversations
@@ -189,6 +192,16 @@ Three MCP tools for metadata capture:
 - `capture_metadata` tool results auto-expand when validation issues are found
 - Validation streamed to frontend via `tool_result` SSE events (async queue piped from MCP tool handler)
 
+### Phase 7: Multimodal Upload + Extraction Pipeline ✅
+**Files:** `agent/tools/extractors.py`, `agent/tools/transcribe.py`, `agent/server.py`, `agent/service.py`, `frontend/app/components/ChatPanel.tsx`
+
+- **Upload-time extraction**: `POST /upload` accepts 22 MIME types + 19 extensions (100 MB cap). Non-native types schedule `asyncio.create_task(_extract_and_store(...))` after the 200 response — single-worker uvicorn never blocks on transcription.
+- **Extractor registry** (`@register` decorator): text/md/json/yaml (read+truncate), CSV/XLSX (markdown table, first 100 rows), DOCX (python-docx paragraphs), audio (ffmpeg→whisper.cpp transcript), video (transcript + 3 keyframes via ffmpeg `-ss` fast-seek).
+- **whisper.cpp integration**: `ffmpeg -ar 16000 -ac 1` normalizes to mono WAV → `whisper-cli` runs STT. Both expected on `$PATH`. Model (`ggml-base.en.bin`, ~140MB) downloaded via `scripts/download_whisper_model.sh`. `/health` reports availability; audio/video uploads 503 if missing.
+- **`GET /uploads/{id}/extraction`**: `{status: pending|done|error, text_preview, meta, image_count}`. Frontend polls this 1s/10x after upload; shows "processing…" chip until done.
+- **Chat-time**: `_build_multimodal_content` reads cached extraction from DB. Images/PDFs still base64'd directly to Claude; everything else injected as text + video keyframes as image blocks.
+- **Frontend**: removed client-side type filter (server validates), file-type icon chips (🎵🎬📊📄📝), expanded `<input accept>`.
+
 ---
 
 ## Key Technical Decisions
@@ -209,6 +222,8 @@ Three MCP tools for metadata capture:
 | Session titles | First user message from DB | Matches Claude desktop UX; no extra LLM call needed |
 | Schema validation | `aind-data-schema` Pydantic introspection | Canonical enums + unknown-field checks, no hardcoded drift |
 | Validation display | `tool_result` SSE + `contextvars` queue | Tool handler pushes results; stream drains them inline |
+| Upload extraction timing | Upload-time background task (not chat-time) | Single-worker uvicorn would stall all users for 120s during transcription |
+| Audio/video transcription | `ffmpeg` + `whisper.cpp` binaries on `$PATH` | No Python ML stack (no torch), no external API cost, no keys to manage |
 | Auth | None for MVP | Add Allen SSO later |
 
 ---
@@ -224,8 +239,14 @@ python3 -m uvicorn agent.server:app --port 8001 --reload  # auto-reloads on file
 npm install
 npm run dev                                                # auto-reloads on file save
 
+# Optional: audio/video transcription (for .mp3/.wav/.mp4/.mov uploads)
+# macOS:  brew install ffmpeg whisper-cpp
+# Replit: add pkgs.ffmpeg + pkgs.whisper-cpp to replit.nix
+./scripts/download_whisper_model.sh                               # ~140MB, one-time
+
 # Run evals (from metadata-capture/ directory)
 python3 -m pytest evals/ -x -q                                    # deterministic only
+python3 -m pytest evals/tasks/extraction/ -v -m binary             # transcription tests (needs ffmpeg + whisper-cli)
 python3 -m pytest evals/tasks/conversation/ -v -m llm              # LLM-graded transcripts (needs ANTHROPIC_API_KEY)
 python3 -m pytest evals/tasks/agent/ -v -m llm                     # end-to-end agent evals (needs ANTHROPIC_API_KEY)
 python3 -m pytest evals/tasks/validation/ -v -m network            # registry lookups (needs network)
@@ -242,8 +263,10 @@ python3 -m pytest evals/tasks/validation/ -v -m network            # registry lo
 ---
 
 ## Future Work
-- Multi-modal input (audio, image, video, documents)
 - MCP write access to AIND MongoDB
 - Cloud deployment (Cloud Run)
 - Allen SSO authentication
 - Performance optimization (concurrent users, token efficiency)
+- DOCX embedded images (convert-to-PDF path)
+- Non-English transcription (currently base.en model only)
+- Task drain-on-shutdown (extraction tasks stuck at `pending` if server restarts mid-run)
