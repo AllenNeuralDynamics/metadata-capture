@@ -1,5 +1,6 @@
 """Tools for persisting and retrieving metadata records in SQLite."""
 
+import base64
 import json
 import logging
 import uuid
@@ -402,6 +403,83 @@ async def get_upload(upload_id: str) -> dict[str, Any] | None:
     cursor = await db.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,))
     row = await cursor.fetchone()
     return dict(row) if row else None
+
+
+async def set_upload_extraction(
+    upload_id: str,
+    text: str,
+    images: list[tuple[bytes, str]],
+    meta: dict,
+    error: str | None,
+) -> None:
+    """Persist extraction results for an upload.
+
+    Image bytes are base64-encoded for JSON storage:
+    [{"data": <b64 str>, "caption": <str>}, ...].
+    """
+    db = await get_db()
+    images_json = json.dumps([
+        {"data": base64.b64encode(b).decode("ascii"), "caption": cap}
+        for b, cap in images
+    ])
+    meta_json = json.dumps(meta)
+    status = "error" if error else "done"
+    await db.execute(
+        """UPDATE uploads
+           SET extracted_text = ?,
+               extracted_images_json = ?,
+               extracted_meta_json = ?,
+               extraction_status = ?,
+               extraction_error = ?
+           WHERE id = ?""",
+        (text, images_json, meta_json, status, error, upload_id),
+    )
+    await db.commit()
+
+
+async def get_upload_extraction(upload_id: str) -> dict[str, Any] | None:
+    """Fetch extraction results for an upload.
+
+    Returns {"status", "text", "images", "meta", "error"} with images
+    decoded back to [(bytes, caption), ...], or None if the upload
+    doesn't exist.
+    """
+    db = await get_db()
+    cursor = await db.execute(
+        """SELECT extraction_status, extracted_text, extracted_images_json,
+                  extracted_meta_json, extraction_error
+           FROM uploads WHERE id = ?""",
+        (upload_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+
+    images: list[tuple[bytes, str]] = []
+    raw_images = row["extracted_images_json"]
+    if raw_images:
+        try:
+            for item in json.loads(raw_images):
+                images.append(
+                    (base64.b64decode(item["data"]), item["caption"])
+                )
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("Malformed extracted_images_json for upload %s", upload_id)
+
+    meta: dict = {}
+    raw_meta = row["extracted_meta_json"]
+    if raw_meta:
+        parsed = _parse_json(raw_meta)
+        if isinstance(parsed, dict):
+            meta = parsed
+
+    return {
+        "status": row["extraction_status"],
+        "text": row["extracted_text"],
+        "images": images,
+        "meta": meta,
+        "error": row["extraction_error"],
+    }
 
 
 # ---------------------------------------------------------------------------

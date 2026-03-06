@@ -51,9 +51,24 @@ CREATE TABLE IF NOT EXISTS uploads (
     file_path TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
     session_id TEXT,
+    extracted_text TEXT,
+    extracted_images_json TEXT,
+    extracted_meta_json TEXT,
+    extraction_status TEXT DEFAULT 'pending',
+    extraction_error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
+
+# Columns added to uploads after initial release — migrated in database.init_db()
+# via PRAGMA table_info check + ALTER TABLE.
+UPLOADS_EXTRACTION_COLUMNS: list[tuple[str, str]] = [
+    ("extracted_text", "TEXT"),
+    ("extracted_images_json", "TEXT"),
+    ("extracted_meta_json", "TEXT"),
+    ("extraction_status", "TEXT DEFAULT 'pending'"),
+    ("extraction_error", "TEXT"),
+]
 
 ARTIFACTS_TABLE = """
 CREATE TABLE IF NOT EXISTS artifacts (
