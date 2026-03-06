@@ -212,6 +212,7 @@ async def list_records(
     category: str | None = None,
     session_id: str | None = None,
     status: str | None = None,
+    ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """List records with optional filters."""
     db = await get_db()
@@ -230,6 +231,10 @@ async def list_records(
     if status:
         clauses.append("status = ?")
         params.append(status)
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        clauses.append(f"id IN ({placeholders})")
+        params.extend(ids)
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     cursor = await db.execute(
