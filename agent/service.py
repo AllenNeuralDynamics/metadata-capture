@@ -22,9 +22,9 @@ from .tools.capture_mcp import capture_server
 from .tools.metadata_store import (
     get_conversation_history,
     get_session_records,
+    get_upload_extraction,
     save_conversation_turn,
 )
-from .tools.spreadsheet import SPREADSHEET_CONTENT_TYPES, format_for_prompt, parse_spreadsheet
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +123,12 @@ def _format_conversation_context(history: list[dict[str, Any]], user_message: st
                         content += f"\n[Attached image: {fname}]"
                     elif ct == "application/pdf":
                         content += f"\n[Attached PDF: {fname}]"
-                    elif ct in SPREADSHEET_CONTENT_TYPES:
-                        content += f"\n[Attached spreadsheet: {fname}]"
+                    else:
+                        # Generic fallback covers spreadsheets, text, docx,
+                        # audio, video — anything the extraction pipeline
+                        # handles. Include the MIME type so the agent can
+                        # reason about what kind of file it was.
+                        content += f"\n[Attached {ct or 'file'}: {fname}]"
             parts.append(f"{role}: {content}")
         parts.append("")
 
@@ -157,55 +161,101 @@ async def _create_message_stream(prompt: str | list[dict[str, Any]]):
     }
 
 
-def _build_multimodal_content(
+async def _build_multimodal_content(
     text_prompt: str, attachments: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Build Claude API content blocks from text + file attachments."""
+    """Build Claude API content blocks from text + file attachments.
+
+    Native types (images, PDF) are read from disk and base64-encoded inline.
+    Everything else is looked up in the uploads.extraction_* columns — the
+    heavy work (spreadsheet parsing, docx, transcription, keyframes) already
+    ran as a background task at upload time.
+    """
     content_blocks: list[dict[str, Any]] = []
 
     for att in attachments:
         file_path = Path(att.get("file_path", ""))
         content_type = att.get("content_type", "")
         filename = att.get("filename", file_path.name or "file")
+        file_id = att.get("file_id")
 
-        if not file_path.exists():
-            logger.warning("Attachment file not found: %s", file_path)
-            continue
-
-        if content_type in SPREADSHEET_CONTENT_TYPES:
-            # Parse spreadsheet and inject as a text block (markdown table)
-            try:
-                parsed = parse_spreadsheet(file_path, content_type)
-                formatted = format_for_prompt(parsed, filename)
-                content_blocks.append({"type": "text", "text": formatted})
-            except Exception as exc:
-                logger.exception("Failed to parse spreadsheet %s: %s", file_path, exc)
+        # --- Native types: send raw bytes to Claude ------------------------
+        if content_type.startswith("image/") or content_type == "application/pdf":
+            if not file_path.exists():
+                logger.warning("Attachment file not found: %s", file_path)
+                continue
+            raw = file_path.read_bytes()
+            b64_data = base64.standard_b64encode(raw).decode("ascii")
+            if content_type.startswith("image/"):
                 content_blocks.append({
-                    "type": "text",
-                    "text": f"[Attached spreadsheet: {filename} — could not be parsed]",
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": content_type, "data": b64_data},
+                })
+            else:
+                content_blocks.append({
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": b64_data},
                 })
             continue
 
-        raw = file_path.read_bytes()
-        b64_data = base64.standard_b64encode(raw).decode("ascii")
+        # --- Non-native: read cached extraction from DB --------------------
+        if not file_id:
+            logger.warning("Non-native attachment %s has no file_id; skipping", filename)
+            continue
 
-        if content_type.startswith("image/"):
+        extraction = await get_upload_extraction(file_id)
+        if extraction is None:
+            # Upload row doesn't exist — shouldn't happen if get_upload()
+            # succeeded upstream, but guard anyway.
+            logger.warning("No extraction row for upload %s", file_id)
+            continue
+
+        status = extraction["status"]
+
+        if status == "pending":
+            content_blocks.append({
+                "type": "text",
+                "text": (
+                    f"[Attachment {filename} is still being processed — "
+                    f"extraction not yet complete. Ask the user to wait a "
+                    f"moment and resend their message.]"
+                ),
+            })
+            continue
+
+        if status == "error":
+            content_blocks.append({
+                "type": "text",
+                "text": f"[Attachment {filename}: extraction failed — {extraction['error']}]",
+            })
+            continue
+
+        # status == "done": inject extracted images then text
+        for img_bytes, caption in extraction["images"]:
             content_blocks.append({
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": content_type,
-                    "data": b64_data,
+                    "media_type": "image/png",
+                    "data": base64.standard_b64encode(img_bytes).decode("ascii"),
                 },
             })
-        elif content_type == "application/pdf":
+            content_blocks.append({"type": "text", "text": f"[{caption}]"})
+
+        text = extraction["text"] or ""
+        if text:
+            header = f"[Attachment: {filename}]\n"
+            # Partial-success case (e.g. video keyframes OK but transcription
+            # timed out) — surface the error alongside the content we do have.
+            if extraction["error"]:
+                header += f"[Note: partial extraction — {extraction['error']}]\n"
+            content_blocks.append({"type": "text", "text": header + text})
+        elif not extraction["images"]:
+            # Done but empty — rare, but tell the agent rather than silently
+            # dropping the attachment.
             content_blocks.append({
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": "application/pdf",
-                    "data": b64_data,
-                },
+                "type": "text",
+                "text": f"[Attachment {filename}: extraction completed but produced no content]",
             })
 
     # Text prompt always comes last
@@ -253,19 +303,22 @@ async def chat(
 
     # Build multimodal content if attachments are present
     if attachments:
-        # Resolve file paths from upload records
+        # Resolve file paths from upload records. Carry file_id through so
+        # _build_multimodal_content can look up cached extraction results
+        # for non-native types.
         resolved_attachments = []
         for att in attachments:
             from .tools.metadata_store import get_upload
             upload = await get_upload(att["file_id"])
             if upload:
                 resolved_attachments.append({
+                    "file_id": att["file_id"],
                     "file_path": upload["file_path"],
                     "content_type": att["content_type"],
                     "filename": att["filename"],
                 })
         if resolved_attachments:
-            prompt_content = _build_multimodal_content(prompt, resolved_attachments)
+            prompt_content = await _build_multimodal_content(prompt, resolved_attachments)
         else:
             prompt_content = prompt
     else:

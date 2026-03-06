@@ -1,6 +1,8 @@
 """FastAPI HTTP server wrapping the metadata capture agent service."""
 
+import asyncio
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,13 +16,28 @@ from pydantic import BaseModel
 
 from .db.database import close_db, init_db
 from .service import AVAILABLE_MODELS, DEFAULT_MODEL, chat, get_session_messages, get_sessions
+from .tools.extractors import EXTRACTORS, EXT_EXTRACTORS, NATIVE_TYPES
 from .tools.spreadsheet import SPREADSHEET_CONTENT_TYPES, parse_spreadsheet
 
+logger = logging.getLogger(__name__)
+
 UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
-ALLOWED_CONTENT_TYPES = {
-    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
-} | SPREADSHEET_CONTENT_TYPES
-MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
+
+# Derive allowed types from the extractor registry so server.py never drifts
+# from extractors.py. NATIVE_TYPES are the formats Claude sees directly
+# (images, PDF); everything in EXTRACTORS/EXT_EXTRACTORS goes through the
+# upload-time background extraction pipeline.
+ALLOWED_CONTENT_TYPES = NATIVE_TYPES | set(EXTRACTORS.keys())
+ALLOWED_EXTENSIONS = set(EXT_EXTRACTORS.keys())
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB — video needs headroom
+
+# Extensions corresponding to NATIVE_TYPES — used to skip extraction when a
+# native file arrives with a generic content-type like application/octet-stream.
+_NATIVE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"})
+
+# Audio/video: fail fast at upload if ffmpeg/whisper are unavailable rather
+# than accepting the file and erroring 120s later at chat time.
+_AV_EXTS = frozenset({".mp3", ".wav", ".m4a", ".ogg", ".mp4", ".mov", ".webm", ".mkv"})
 
 # Load environment variables from .env file
 load_dotenv()
@@ -247,36 +264,84 @@ async def delete_session_endpoint(session_id: str):
 # ---------------------------------------------------------------------------
 
 
+async def _extract_and_store(upload_id: str, path: Path, content_type: str) -> None:
+    """Background: run extraction and persist to the uploads row.
+
+    Swallows all exceptions — a background failure must never crash the
+    server. On any error the upload row is marked status='error' so the
+    chat path can surface a readable message to the user.
+    """
+    from .tools.extractors import extract
+    from .tools.metadata_store import set_upload_extraction
+
+    try:
+        result = await extract(path, content_type)
+        await set_upload_extraction(
+            upload_id,
+            text=result.text,
+            images=result.images,
+            meta=result.meta,
+            error=result.error,
+        )
+    except Exception as exc:
+        logger.exception("Background extraction failed for %s", upload_id)
+        try:
+            await set_upload_extraction(
+                upload_id, text="", images=[], meta={}, error=str(exc),
+            )
+        except Exception:
+            # DB write itself failed — log and give up. The row stays
+            # 'pending'; the chat path will tell the user to wait, which
+            # is the least-bad outcome here.
+            logger.exception("Failed to persist extraction error for %s", upload_id)
+
+
 @app.post("/upload")
 async def upload_file(file: UploadFile, session_id: str | None = None):
-    """Upload a file (image or PDF) for use in chat messages."""
+    """Upload a file for use in chat messages.
+
+    Native types (images, PDF) are stored as-is. Everything else is handed to
+    the extraction pipeline as a background task so the single-worker uvicorn
+    process isn't blocked for the duration of a transcription.
+    """
     from .tools.metadata_store import save_upload
 
-    # Some OSes report .csv as text/plain; fall back to extension sniffing
     content_type = file.content_type or ""
-    if content_type not in ALLOWED_CONTENT_TYPES:
-        fname_lower = (file.filename or "").lower()
-        if fname_lower.endswith(".csv"):
-            content_type = "text/csv"
-        elif fname_lower.endswith(".xlsx"):
-            content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        else:
+    ext = Path(file.filename or "").suffix.lower()
+
+    # MIME type takes precedence; extension is the fallback for browsers that
+    # report application/octet-stream or text/plain for known formats.
+    if content_type not in ALLOWED_CONTENT_TYPES and ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {content_type or '(none)'} / {ext or '(no ext)'}",
+        )
+
+    # Audio/video: refuse the upload if ffmpeg/whisper aren't installed.
+    # Better a 503 now than a silent "still processing" forever.
+    if content_type.startswith(("audio/", "video/")) or ext in _AV_EXTS:
+        from .tools.transcribe import check_availability
+        avail = check_availability()
+        if not avail["available"]:
             raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: {file.content_type}. Allowed: {', '.join(sorted(ALLOWED_CONTENT_TYPES))}",
+                status_code=503,
+                detail=f"Transcription unavailable: missing {', '.join(avail['missing'])}",
             )
 
     contents = await file.read()
     if len(contents) > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail="File too large. Maximum size is 20 MB.")
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024 * 1024)} MB.",
+        )
 
     file_id = str(uuid.uuid4())
-    ext = Path(file.filename or "file").suffix or ".bin"
-    dest = UPLOADS_DIR / f"{file_id}{ext}"
+    dest_ext = ext or ".bin"
+    dest = UPLOADS_DIR / f"{file_id}{dest_ext}"
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(contents)
 
-    return await save_upload(
+    result = await save_upload(
         upload_id=file_id,
         original_filename=file.filename or "unknown",
         content_type=content_type,
@@ -284,6 +349,37 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
         size_bytes=len(contents),
         session_id=session_id,
     )
+
+    # Schedule extraction for non-native types. The task runs after this
+    # response is returned; the DB row starts as 'pending' and flips to
+    # 'done'/'error' when the task finishes.
+    if content_type not in NATIVE_TYPES and ext not in _NATIVE_EXTS:
+        asyncio.create_task(_extract_and_store(file_id, dest, content_type))
+
+    return result
+
+
+@app.get("/uploads/{file_id}/extraction")
+async def get_upload_extraction_endpoint(file_id: str):
+    """Report extraction status and a preview of the extracted content.
+
+    Does not return image bytes — only counts — to keep the response small.
+    The frontend polls this to know when an upload is ready to reference
+    in chat.
+    """
+    from .tools.metadata_store import get_upload_extraction
+
+    result = await get_upload_extraction(file_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    return {
+        "status": result["status"],
+        "text_preview": (result["text"] or "")[:500],
+        "meta": result["meta"],
+        "error": result["error"],
+        "image_count": len(result["images"]),
+    }
 
 
 @app.get("/uploads/{file_id}")
@@ -372,4 +468,11 @@ async def list_models():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok"}
+    from .tools.transcribe import check_availability
+
+    avail = check_availability()
+    return {
+        "status": "ok",
+        "transcription": "available" if avail["available"]
+                         else f"unavailable: {', '.join(avail['missing'])}",
+    }
