@@ -48,7 +48,7 @@ interface EditableCellProps {
   widthPx: number;
 }
 
-const EditableCell = memo(function EditableCell({
+export const EditableCell = memo(function EditableCell({
   value,
   mode,
   enumValues,
@@ -141,7 +141,10 @@ const EditableCell = memo(function EditableCell({
       e.preventDefault();
       startEdit();
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      // Type-to-edit: printable char replaces content
+      // Type-to-edit: printable char replaces content. preventDefault so the
+      // same keystroke doesn't also flow into the autoFocused input (which
+      // would double it — 'X' → setDraft('X') → keypress into input → 'XX').
+      e.preventDefault();
       setDraft(e.key);
       setError(null);
       setIsEditing(true);

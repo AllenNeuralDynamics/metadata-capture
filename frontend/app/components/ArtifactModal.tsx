@@ -58,7 +58,7 @@ interface EditState {
 type TableContent = { columns: string[]; rows: (string | number | null)[][] };
 
 /** Flatten a data_json value to its display string. species is {name,...} → name. */
-function flattenForDisplay(value: unknown): string | number | null {
+export function flattenForDisplay(value: unknown): string | number | null {
   if (value == null) return null;
   if (typeof value === 'object') {
     const v = value as Record<string, unknown>;
@@ -71,7 +71,7 @@ function flattenForDisplay(value: unknown): string | number | null {
 }
 
 /** Build the overlay: for each row, replace cells with live data where we have it. */
-function overlayRows(
+export function overlayRows(
   table: TableContent,
   recordIdColumn: number,
   liveData: Map<string, Record<string, unknown>>,
