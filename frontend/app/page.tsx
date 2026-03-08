@@ -32,21 +32,11 @@ export default function Home() {
     setMetadataOpen(!isMobile);
   }, [isMobile]);
 
-  // Mobile drawer mutual exclusion: opening the left sidebar closes the right
-  // metadata drawer (avoids stacked overlays with competing backdrops).
+  // Close mobile metadata when the left sidebar drawer opens — it has a
+  // backdrop that would block the metadata toggle icon, trapping the user.
   useEffect(() => {
     if (isMobile && isExpanded) setMetadataOpen(false);
   }, [isMobile, isExpanded]);
-
-  // Escape closes the mobile metadata drawer (a11y parity with sidebar drawer).
-  useEffect(() => {
-    if (!isMobile || !metadataOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMetadataOpen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isMobile, metadataOpen]);
 
   const checkHealth = useCallback(async () => {
     try {
@@ -121,14 +111,11 @@ export default function Home() {
 
           <div className="flex-1" />
 
-          {/* Metadata toggle — always visible; on desktop it collapses the
-              right panel, on mobile it opens the overlay drawer. On mobile,
-              opening this also closes the left sidebar (mutual exclusion). */}
+          {/* Metadata toggle — on desktop collapses the right panel; on mobile
+              swaps the chat body for a full-screen MetadataSidebar. The icon
+              stays visible in the top bar either way, so it's the sole toggle. */}
           <button
-            onClick={() => {
-              if (isMobile && !metadataOpen) setIsExpanded(false);
-              setMetadataOpen((v) => !v);
-            }}
+            onClick={() => setMetadataOpen((v) => !v)}
             className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors
                        ${metadataOpen && !isMobile
                          ? 'bg-sand-100 text-sand-700'
@@ -141,8 +128,9 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Chat body */}
-        <div className="flex-1 min-h-0">
+        {/* Chat body — relative so the mobile metadata overlay can position
+            itself over exactly this area (below the top bar). */}
+        <div className="flex-1 min-h-0 relative">
           <ChatPanel
             sessionId={sessionId}
             newChatNonce={newChatNonce}
@@ -151,11 +139,19 @@ export default function Home() {
             selectedModel={selectedModel}
             onStreamingChange={setIsStreaming}
           />
+
+          {/* Mobile metadata: full-screen overlay over the chat body.
+              The top bar stays visible above so the document icon remains
+              tappable to toggle this closed — no backdrop or × button needed. */}
+          {isMobile && metadataOpen && (
+            <div className="absolute inset-0 z-30 bg-white">
+              <MetadataSidebar />
+            </div>
+          )}
         </div>
       </div>
 
-      {/* ═════════════════ Right: metadata panel ═════════════════ */}
-      {/* Desktop: inline collapsible panel */}
+      {/* ═════════════════ Right: metadata panel (desktop only) ═════════════════ */}
       {!isMobile && (
         <div
           className={`border-l border-sand-200 transition-all duration-200 overflow-hidden shrink-0
@@ -163,32 +159,6 @@ export default function Home() {
         >
           {metadataOpen && <MetadataSidebar />}
         </div>
-      )}
-
-      {/* Mobile: full-height overlay drawer from the right */}
-      {isMobile && metadataOpen && (
-        <>
-          <div
-            className="fixed inset-0 bg-black/30 z-40"
-            onClick={() => setMetadataOpen(false)}
-          />
-          <div className="fixed inset-y-0 right-0 z-50 w-[85vw] max-w-sm bg-white shadow-xl flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-sand-200 shrink-0">
-              <span className="text-sm font-medium text-sand-700">Metadata</span>
-              <button
-                onClick={() => setMetadataOpen(false)}
-                className="w-7 h-7 flex items-center justify-center rounded-lg text-sand-400 hover:text-sand-600 hover:bg-sand-100"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="flex-1 min-h-0">
-              <MetadataSidebar />
-            </div>
-          </div>
-        </>
       )}
     </div>
   );
