@@ -264,11 +264,14 @@ npm run dev                                                # auto-reloads on fil
 ./scripts/download_whisper_model.sh                               # ~140MB, one-time
 
 # Run evals (from metadata-capture/ directory)
-python3 -m pytest evals/ -x -q                                    # deterministic only
+python3 -m pytest evals/ -q -m "not llm and not network and not binary"  # deterministic only
 python3 -m pytest evals/tasks/extraction/ -v -m binary             # transcription tests (needs ffmpeg + whisper-cli)
 python3 -m pytest evals/tasks/conversation/ -v -m llm              # LLM-graded transcripts (needs ANTHROPIC_API_KEY)
 python3 -m pytest evals/tasks/agent/ -v -m llm                     # end-to-end agent evals (needs ANTHROPIC_API_KEY)
 python3 -m pytest evals/tasks/validation/ -v -m network            # registry lookups (needs network)
+
+# Frontend tests (from frontend/ directory)
+npm test                                                           # vitest: overlay logic + EditableCell state machine
 ```
 
 ---
@@ -278,6 +281,9 @@ python3 -m pytest evals/tasks/validation/ -v -m network            # registry lo
 - **Relative imports**: Must run backend from `metadata-capture/` directory, not from `agent/`
 - **Tool-based extraction**: Regex extraction has been replaced with Claude tool calls. The old regex bugs (project name, session end time, protocol ID) are no longer applicable.
 - **Python version**: The backend uses `X | Y` union type syntax, which requires Python 3.10+. Any Python ≥ 3.10 works — no conda needed.
+- **Running the backend from inside Claude Code**: The Agent SDK shells out to the `claude` CLI, which refuses nested sessions. Prefix with `CLAUDECODE=` to bypass: `CLAUDECODE= python3 -m uvicorn agent.server:app --port 8001`
+- **Browser verification on homespace**: Use `chromium-cli` (pre-installed). `.click()` doesn't bubble — use `dispatchEvent(new MouseEvent('click', {bubbles: true}))` for React handlers. `window.__openArtifact` (dev only) opens the artifact modal programmatically.
+- **Stale tests**: `evals/tasks/end_to_end/cases.yaml:14,37` hit `/metadata` (doesn't exist — endpoint is `/records`). 2 tests always fail.
 
 ## Performance (TTFT / streaming latency)
 

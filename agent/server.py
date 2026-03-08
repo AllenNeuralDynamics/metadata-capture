@@ -127,6 +127,11 @@ class UpdateRecordDataRequest(BaseModel):
     data: dict[str, Any]
 
 
+class PatchFieldRequest(BaseModel):
+    field: str
+    value: str
+
+
 # ---------------------------------------------------------------------------
 # Chat endpoint
 # ---------------------------------------------------------------------------
@@ -190,16 +195,37 @@ async def list_records_endpoint(
     category: str | None = None,
     session_id: str | None = None,
     status: str | None = None,
+    ids: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List metadata records with optional filters."""
+    """List metadata records with optional filters.
+
+    `ids` is a comma-separated list of record IDs — used by the spreadsheet
+    overlay to batch-fetch live data for an artifact snapshot.
+    """
     from .tools.metadata_store import list_records
 
+    id_list = [i for i in ids.split(",") if i] if ids else None
     return await list_records(
         record_type=type,
         category=category,
         session_id=session_id,
         status=status,
+        ids=id_list,
     )
+
+
+@app.get("/schema/enums")
+async def get_schema_enums() -> dict[str, list[str]]:
+    """Controlled vocabularies for dropdown-editable fields.
+
+    Imports from validation.py (which has inline fallbacks) rather than
+    schema_info so this works without aind-data-schema installed.
+    Modality is omitted — stored as list[{abbreviation}], doesn't fit a
+    single-cell dropdown.
+    """
+    from .validation import VALID_SEX, VALID_SPECIES
+
+    return {"species": sorted(VALID_SPECIES), "sex": sorted(VALID_SEX)}
 
 
 @app.get("/records/{record_id}")
@@ -216,29 +242,79 @@ async def get_record_endpoint(record_id: str) -> dict[str, Any]:
     return record
 
 
+async def _apply_record_update(
+    record_id: str, record_type: str, data_patch: dict[str, Any]
+) -> dict[str, Any]:
+    """Shared tail for PUT and PATCH: merge → validate → refetch."""
+    from .tools.metadata_store import get_record, update_record, update_record_validation
+    from .validation import validate_record
+
+    result = await update_record(record_id, data=data_patch)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to update record")
+
+    validation = validate_record(record_type, result.get("data_json") or {})
+    await update_record_validation(record_id, validation.to_dict())
+
+    updated = await get_record(record_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Record not found after update")
+    return updated
+
+
 @app.put("/records/{record_id}")
 async def update_record_endpoint(record_id: str, req: UpdateRecordDataRequest) -> dict[str, Any]:
     """Update a record's data."""
-    from .tools.metadata_store import get_record, update_record
-    from .validation import validate_record
+    from .tools.metadata_store import get_record
 
     existing = await get_record(record_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    result = await update_record(record_id, data=req.data)
-    if result is None:
-        raise HTTPException(status_code=500, detail="Failed to update record")
+    return await _apply_record_update(record_id, existing["record_type"], req.data)
 
-    # Re-validate
-    from .tools.metadata_store import update_record_validation
-    validation = validate_record(existing["record_type"], result.get("data_json") or {})
-    await update_record_validation(record_id, validation.to_dict())
 
-    updated = await get_record(record_id)
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Record not found after update")
-    return updated
+def _build_field_patch(field: str, value: str) -> dict[str, Any]:
+    """Map a flat (field, value) pair to the correct data_json shape.
+
+    `species` is stored nested — a naive flat write would clobber registry
+    info via update_record's shallow merge. species_name_to_dict reconstructs
+    the complete dict so shallow merge replaces old-complete with new-complete.
+    """
+    from .schema_info import species_name_to_dict
+
+    if field == "species":
+        return {"species": species_name_to_dict(value)}
+    return {field: value}
+
+
+@app.patch("/records/{record_id}/field")
+async def patch_record_field(record_id: str, req: PatchFieldRequest) -> dict[str, Any]:
+    """Update a single field on a record, with server-side shape mapping.
+
+    Unlike PUT /records/{id}, this:
+    - Rejects unknown fields with 400 (PUT warn-and-stores them)
+    - Knows about nested field shapes so the frontend can stay dumb
+    - Takes only {field, value} — server-side merge, no read-before-write race
+    """
+    from .schema_info import KNOWN_FIELDS
+    from .tools.metadata_store import get_record
+
+    existing = await get_record(record_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    record_type = existing["record_type"]
+    known = KNOWN_FIELDS.get(record_type, frozenset())
+    if known and req.field not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown field '{req.field}' for record type '{record_type}'",
+        )
+
+    return await _apply_record_update(
+        record_id, record_type, _build_field_patch(req.field, req.value)
+    )
 
 
 @app.post("/records/{record_id}/confirm")

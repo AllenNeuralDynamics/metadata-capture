@@ -56,6 +56,11 @@ stays available for the user to reopen.
 For "markdown"/"code": a string.
 - `language`: (optional, code only) e.g., "python", "json"
 
+**When rendering a table derived from metadata records:** include a `record_id` column as \
+the first column, and use schema field names (`species`, `sex`, `subject_id`, `genotype`) as \
+column headers. This makes the table editable in the viewer — the user can click a cell to \
+change it, and the edit writes back to the source record.
+
 ## AIND Metadata MCP Tools
 
 You also have access to the aind-metadata-mcp server for querying the live AIND MongoDB:

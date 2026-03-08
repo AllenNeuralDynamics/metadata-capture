@@ -560,12 +560,15 @@ Artifact types:
 - type="markdown": content is a markdown string
 - type="code": content is a code string; pass language="python" etc.
 
-Example:
+Example (table derived from metadata records — include record_id so the user can edit cells in the viewer):
     render_artifact(
         session_id="abc",
         artifact_type="table",
         title="Captured Subjects",
-        content={"columns": ["subject_id", "species", "sex"], "rows": [["4528", "Mus musculus", "Male"]]}
+        content={
+            "columns": ["record_id", "subject_id", "species", "sex", "genotype"],
+            "rows": [["<uuid>", "4528", "Mus musculus", "Male", "Pvalb-IRES-Cre/wt"]],
+        },
     )
 """,
     {
