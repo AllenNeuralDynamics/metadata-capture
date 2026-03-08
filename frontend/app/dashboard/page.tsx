@@ -261,7 +261,10 @@ function RecordEditor({
   };
 
   return (
-    <div className="bg-white rounded-lg border border-sand-200 p-3">
+    <div className="bg-white rounded-lg border border-sand-200 p-3 min-w-0">
+      {/* min-w-0: when this editor sits inside a grid cell, default min-width
+          is max-content (longest field value) — which blows out column widths
+          in library view. Allowing shrink + truncating values keeps tiles even. */}
       <div className="flex items-center gap-2 mb-2">
         <div className={`w-2 h-2 rounded-full ${existingFields.length > 0 ? 'bg-brand-aqua-500' : 'bg-sand-300'}`} />
         <h5 className="text-sm font-medium text-sand-800">
@@ -297,7 +300,8 @@ function RecordEditor({
               ) : field.value ? (
                 <>
                   <span
-                    className="text-sand-700 flex-1 cursor-pointer"
+                    className="text-sand-700 flex-1 min-w-0 truncate cursor-pointer"
+                    title={field.value}
                     onClick={() => { setEditingKey(field.key); setEditValue(field.value); }}
                   >
                     {field.value}
@@ -406,11 +410,13 @@ function SessionView({
     <table className="w-full table-fixed bg-white rounded-xl border border-sand-200 overflow-hidden">
       {/* table-fixed + colgroup locks column widths so the expanded colSpan row
           can't reflow sibling rows. Without this, table-layout:auto recomputes
-          every column width whenever an expanded row renders its inner grid. */}
+          every column width whenever an expanded row renders its inner grid.
+          Records gets the flex column since chips need room to wrap; Session
+          title is already truncate max-w-xs so it doesn't need extra space. */}
       <colgroup>
-        <col />                      {/* Session — flex */}
-        <col className="w-48" />     {/* Records chips */}
-        <col className="w-40" />     {/* Created timestamp */}
+        <col className="w-80" />     {/* Session — title truncates at max-w-xs anyway */}
+        <col />                      {/* Records chips — flex */}
+        <col className="w-44" />     {/* Created timestamp */}
         <col className="w-24" />     {/* Actions */}
       </colgroup>
       <thead>
@@ -464,7 +470,7 @@ function SessionView({
                   <td colSpan={4} className="px-6 py-4 bg-sand-50 border-b border-sand-200">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {sessionRecords.map((r) => (
-                        <div key={r.id} id={`record-${r.id}`}>
+                        <div key={r.id} id={`record-${r.id}`} className="min-w-0">
                           <RecordEditor record={r} onSaved={onFieldSaved} />
                         </div>
                       ))}
@@ -543,7 +549,7 @@ function LibraryView({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {SHARED_TYPES.flatMap((type) =>
             (byType[type] || []).map((r) => (
-              <div key={r.id} id={`row-${r.id}`}>
+              <div key={r.id} id={`row-${r.id}`} className="min-w-0">
                 <RecordEditor record={r} onSaved={onFieldSaved} />
                 {r.status === 'draft' && (
                   <button
@@ -571,7 +577,7 @@ function LibraryView({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {ASSET_TYPES.flatMap((type) =>
             (byType[type] || []).map((r) => (
-              <div key={r.id} id={`row-${r.id}`}>
+              <div key={r.id} id={`row-${r.id}`} className="min-w-0">
                 <RecordEditor record={r} onSaved={onFieldSaved} />
                 {r.status === 'draft' && (
                   <button
@@ -694,6 +700,16 @@ export default function DashboardPage() {
     confirmed: records.filter((r) => r.status === 'confirmed').length,
   };
 
+  // When a status/search filter is active, also filter the sessions list so
+  // the table doesn't show rows for sessions whose records were all filtered
+  // out. Without this the Draft pill can say "(0)" while the table still
+  // renders every session row with "No records" in each — confusing.
+  const filteredSessionIds = new Set(filtered.map((r) => r.session_id));
+  const visibleSessions =
+    filter === 'all' && !search
+      ? sessions
+      : sessions.filter((s) => filteredSessionIds.has(s.session_id));
+
   return (
     <div className="h-screen flex flex-col bg-white">
       <Header />
@@ -757,7 +773,7 @@ export default function DashboardPage() {
         ) : view === 'session' ? (
           <SessionView
             records={filtered}
-            sessions={sessions}
+            sessions={visibleSessions}
             expandedId={expandedId}
             onToggle={(id) => setExpandedId(expandedId === id ? null : id)}
             onConfirm={handleConfirm}

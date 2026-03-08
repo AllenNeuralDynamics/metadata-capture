@@ -26,6 +26,28 @@ function isSpreadsheet(typeOrName: string): boolean {
   return SPREADSHEET_TYPES.has(typeOrName) || typeOrName.toLowerCase().endsWith('.csv') || typeOrName.toLowerCase().endsWith('.xlsx');
 }
 
+// Recursively collect File objects from a FileSystemEntry tree. readEntries()
+// returns at most 100 entries per call (Chrome quirk) so we loop until empty.
+// Used by handleDrop to support folder drag-and-drop — dataTransfer.files
+// only contains the folder itself, not its contents.
+async function collectEntryFiles(entry: FileSystemEntry, out: File[]): Promise<void> {
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) =>
+      (entry as FileSystemFileEntry).file(resolve, reject),
+    );
+    out.push(file);
+  } else if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    while (true) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+        reader.readEntries(resolve, reject),
+      );
+      if (batch.length === 0) break;
+      await Promise.all(batch.map((child) => collectEntryFiles(child, out)));
+    }
+  }
+}
+
 // Upload a batch of files with at most `limit` in flight at once. Results
 // preserve input order so the caller can zip them back onto UI state.
 // Inline p-limit — not worth a dependency for ~15 lines.
@@ -378,12 +400,23 @@ export default function ChatPanel({ sessionId, onSessionChange, agentOnline }: C
   // every streaming token auto-scrolls; once the user scrolls up, we stop
   // fighting them until they scroll back down or send a new message.
   const isPinnedToBottomRef = useRef(true);
+  // Mirror of `messages` state for stream callbacks. When the user navigates
+  // away mid-stream, ChatPanel unmounts and React silently discards any
+  // further setState calls — but the SSE fetch keeps running. Writing to
+  // this ref lets us keep accumulating tokens and persist the full response
+  // to localStorage so it's there when the user returns.
+  const messagesRef = useRef<StructuredMessage[]>([]);
 
   // Track mount state so async polls don't update state after unmount
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  // Keep the ref in sync with state for non-stream updates (history load etc.)
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -516,11 +549,28 @@ export default function ChatPanel({ sessionId, onSessionChange, agentOnline }: C
     setIsDragging(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     if (!agentOnline) return;
-    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+
+    // webkitGetAsEntry lets us distinguish files from directories. When a
+    // folder is dragged, dataTransfer.files contains only the folder itself
+    // (empty File on Chrome) — we have to recurse the FileSystemEntry tree
+    // to get the actual contents.
+    const items = Array.from(e.dataTransfer.items);
+    const entries = items
+      .map((it) => (it.kind === 'file' && 'webkitGetAsEntry' in it ? it.webkitGetAsEntry() : null))
+      .filter((en): en is FileSystemEntry => en !== null);
+
+    if (entries.length) {
+      const collected: File[] = [];
+      await Promise.all(entries.map((en) => collectEntryFiles(en, collected)));
+      if (collected.length) addFiles(collected);
+    } else if (e.dataTransfer.files.length) {
+      // Fallback: browsers without webkitGetAsEntry — plain file drop only.
+      addFiles(e.dataTransfer.files);
+    }
   };
 
   // ---------------------------------------------------------------------------
@@ -625,108 +675,131 @@ export default function ChatPanel({ sessionId, onSessionChange, agentOnline }: C
     // Re-pin on send so the new assistant response auto-scrolls even if
     // the user had scrolled up earlier in the conversation.
     isPinnedToBottomRef.current = true;
-    setMessages((prev) => [...prev, userMsg]);
+
+    // Seed both the ref and state with the user msg + empty assistant slot.
+    // From here on the stream callbacks update messagesRef directly, then
+    // sync state only if still mounted — so navigation mid-stream doesn't
+    // lose tokens.
+    messagesRef.current = [...messagesRef.current, userMsg, { role: 'assistant', content: '' }];
+    setMessages(messagesRef.current);
     setInput('');
-    // Clean up previews and clear pending files
     pendingFiles.forEach((f) => f.preview && URL.revokeObjectURL(f.preview));
     setPendingFiles([]);
     setIsStreaming(true);
 
-    // Add empty assistant message to stream into
-    setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
-
     const controller = new AbortController();
     abortControllerRef.current = controller;
+
+    // Capture session_id now — sessionStorage is set by sendChatMessage on
+    // the first SSE chunk, so for a new session this starts null.
+    let sid = sessionId;
+
+    // Persist at most once per 250ms so we don't thrash localStorage at
+    // SSE-token rate. Final save on done is unconditional.
+    let lastPersist = 0;
+    const maybePersist = () => {
+      const now = Date.now();
+      if (sid && now - lastPersist > 250) {
+        saveMessagesToStorage(sid, messagesRef.current);
+        lastPersist = now;
+      }
+    };
 
     await sendChatMessage(
       trimmed || '(attached files)',
       sessionId,
       (event) => {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last.role !== 'assistant') return prev;
+        // Pick up session_id from sessionStorage once the first chunk sets it.
+        sid ||= sessionStorage.getItem('chat_session_id');
 
-          const blocks: MessageBlock[] = [...(last.blocks || [])];
-          let content = last.content;
+        // --- Apply event to the ref (survives unmount) --------------------
+        const msgs = messagesRef.current;
+        const last = msgs[msgs.length - 1];
+        if (!last || last.role !== 'assistant') return;
 
-          if (event.content) {
-            // Text delta — append to last text block or start a new one
-            const lastBlock = blocks[blocks.length - 1];
-            if (lastBlock && lastBlock.type === 'text') {
-              blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + event.content };
-            } else {
-              blocks.push({ type: 'text', content: event.content as string });
-            }
-            content += event.content as string;
-          } else if (event.thinking_start) {
-            blocks.push({ type: 'thinking', content: '' });
-          } else if (event.thinking) {
-            const lastBlock = blocks[blocks.length - 1];
-            if (lastBlock && lastBlock.type === 'thinking') {
-              blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + (event.thinking as string) };
-            }
-          } else if (event.tool_use_start) {
-            const info = event.tool_use_start as { name: string; id: string };
-            blocks.push({ type: 'tool_use', content: '', name: info.name, toolUseId: info.id });
-          } else if (event.tool_use_input) {
-            const lastBlock = blocks[blocks.length - 1];
-            if (lastBlock && lastBlock.type === 'tool_use') {
-              blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + (event.tool_use_input as string) };
-            }
-          } else if (event.tool_result) {
-            const result = event.tool_result as { tool_use_id: string; validation: ToolValidation };
-            const idx = blocks.findIndex(b => b.type === 'tool_use' && b.toolUseId === result.tool_use_id);
-            if (idx !== -1) {
-              blocks[idx] = { ...blocks[idx], validation: result.validation };
-            }
-          } else if (event.artifact) {
-            const art = event.artifact as { id: string; type: string; title: string; tool_use_id?: string | null };
-            const ref: ArtifactRef = { id: art.id, type: art.type, title: art.title };
-            // Attach to the matching tool_use block; fall back to the last tool_use block
-            let idx = art.tool_use_id
-              ? blocks.findIndex(b => b.type === 'tool_use' && b.toolUseId === art.tool_use_id)
-              : -1;
-            if (idx === -1) {
-              for (let k = blocks.length - 1; k >= 0; k--) {
-                if (blocks[k].type === 'tool_use') { idx = k; break; }
-              }
-            }
-            if (idx !== -1) {
-              blocks[idx] = { ...blocks[idx], artifact: ref };
+        const blocks: MessageBlock[] = [...(last.blocks || [])];
+        let content = last.content;
+
+        if (event.content) {
+          const lastBlock = blocks[blocks.length - 1];
+          if (lastBlock && lastBlock.type === 'text') {
+            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + event.content };
+          } else {
+            blocks.push({ type: 'text', content: event.content as string });
+          }
+          content += event.content as string;
+        } else if (event.thinking_start) {
+          blocks.push({ type: 'thinking', content: '' });
+        } else if (event.thinking) {
+          const lastBlock = blocks[blocks.length - 1];
+          if (lastBlock && lastBlock.type === 'thinking') {
+            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + (event.thinking as string) };
+          }
+        } else if (event.tool_use_start) {
+          const info = event.tool_use_start as { name: string; id: string };
+          blocks.push({ type: 'tool_use', content: '', name: info.name, toolUseId: info.id });
+        } else if (event.tool_use_input) {
+          const lastBlock = blocks[blocks.length - 1];
+          if (lastBlock && lastBlock.type === 'tool_use') {
+            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + (event.tool_use_input as string) };
+          }
+        } else if (event.tool_result) {
+          const result = event.tool_result as { tool_use_id: string; validation: ToolValidation };
+          const idx = blocks.findIndex(b => b.type === 'tool_use' && b.toolUseId === result.tool_use_id);
+          if (idx !== -1) {
+            blocks[idx] = { ...blocks[idx], validation: result.validation };
+          }
+        } else if (event.artifact) {
+          const art = event.artifact as { id: string; type: string; title: string; tool_use_id?: string | null };
+          const ref: ArtifactRef = { id: art.id, type: art.type, title: art.title };
+          let idx = art.tool_use_id
+            ? blocks.findIndex(b => b.type === 'tool_use' && b.toolUseId === art.tool_use_id)
+            : -1;
+          if (idx === -1) {
+            for (let k = blocks.length - 1; k >= 0; k--) {
+              if (blocks[k].type === 'tool_use') { idx = k; break; }
             }
           }
-          // block_stop: no state change needed — next delta auto-starts a new block
+          if (idx !== -1) {
+            blocks[idx] = { ...blocks[idx], artifact: ref };
+          }
+        }
+        // block_stop: no state change needed — next delta auto-starts a new block
 
-          updated[updated.length - 1] = { ...last, content, blocks };
-          return updated;
-        });
+        // Replace last message in the ref. Use a new array so React's ===
+        // check sees a change when we sync to state.
+        messagesRef.current = [...msgs.slice(0, -1), { ...last, content, blocks }];
+
+        // Sync to state only if still mounted; persist regardless.
+        if (mountedRef.current) setMessages(messagesRef.current);
+        maybePersist();
       },
       () => {
         abortControllerRef.current = null;
-        setIsStreaming(false);
-        const sid = sessionStorage.getItem('chat_session_id');
+        sid ||= sessionStorage.getItem('chat_session_id');
         if (sid) {
-          // Persist full messages (content + blocks) so partial responses
-          // and structured blocks survive refresh / navigation / abort.
-          setMessages((prev) => {
-            saveMessagesToStorage(sid, prev);
-            return prev;
-          });
-          onSessionChange(sid);
+          // Unconditional final persist — ref has the complete stream even if
+          // the user navigated away mid-response.
+          saveMessagesToStorage(sid, messagesRef.current);
+        }
+        if (mountedRef.current) {
+          setIsStreaming(false);
+          if (sid) onSessionChange(sid);
         }
       },
       (err) => {
         abortControllerRef.current = null;
-        setIsStreaming(false);
-        setError(err.message);
-        // Remove empty assistant message on error
-        setMessages((prev) => {
-          if (prev[prev.length - 1]?.content === '') {
-            return prev.slice(0, -1);
-          }
-          return prev;
-        });
+        // Strip the empty assistant slot on error
+        const trimmed = messagesRef.current.at(-1)?.content === ''
+          ? messagesRef.current.slice(0, -1)
+          : messagesRef.current;
+        messagesRef.current = trimmed;
+        if (sid) saveMessagesToStorage(sid, trimmed);
+        if (mountedRef.current) {
+          setIsStreaming(false);
+          setError(err.message);
+          setMessages(trimmed);
+        }
       },
       controller.signal,
       selectedModel || undefined,
