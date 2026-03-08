@@ -141,6 +141,65 @@ interface ArtifactRef {
   title: string;
 }
 
+/** Attachment cards rendered above the user bubble (claude.ai layout).
+ * Images show as thumbnails; everything else as square file cards.
+ * Right-aligned and wrapped; scrolls at >2 rows so a 20-file dump
+ * doesn't eat the whole viewport. */
+function UserAttachmentGroup({
+  attachments,
+  extractionStatus,
+  onOpenSpreadsheet,
+}: {
+  attachments: MessageAttachment[];
+  extractionStatus: Record<string, 'pending' | 'done' | 'error'>;
+  onOpenSpreadsheet: (fileId: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2 justify-end max-h-64 overflow-y-auto pr-1">
+      {attachments.map((att, ai) => {
+        if (att.content_type.startsWith('image/')) {
+          return (
+            <a key={ai} href={getUploadUrl(att.file_id)} target="_blank" rel="noopener noreferrer"
+               className="block shrink-0">
+              <img
+                src={getUploadUrl(att.file_id)}
+                alt={att.filename}
+                className="w-28 h-28 rounded-xl object-cover border border-sand-200 shadow-sm"
+              />
+            </a>
+          );
+        }
+        const extStatus = extractionStatus[att.file_id];
+        const spreadsheet = isSpreadsheet(att.content_type) || isSpreadsheet(att.filename);
+        // Square card with large icon + filename overlay, like PDF tiles in claude.ai
+        const card = (
+          <div className="w-28 h-28 rounded-xl border border-sand-200 bg-white shadow-sm
+                          flex flex-col items-center justify-center relative overflow-hidden shrink-0">
+            <span className="text-3xl leading-none">{fileTypeIcon(att.content_type, att.filename)}</span>
+            <span className="absolute bottom-0 inset-x-0 bg-white/95 border-t border-sand-100
+                             px-1.5 py-1 text-[10px] text-sand-600 truncate text-center"
+                  title={att.filename}>
+              {att.filename}
+            </span>
+            {extStatus === 'pending' && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-brand-fig animate-pulse"
+                    title="processing…" />
+            )}
+          </div>
+        );
+        return spreadsheet ? (
+          <button key={ai} onClick={() => onOpenSpreadsheet(att.file_id)}
+                  className="shrink-0 hover:scale-[1.03] transition-transform" title="View spreadsheet">
+            {card}
+          </button>
+        ) : (
+          <div key={ai}>{card}</div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface MessageBlock {
   type: 'text' | 'thinking' | 'tool_use';
   content: string;
@@ -155,6 +214,10 @@ interface StructuredMessage {
   content: string;       // plain text (persistence & history fallback)
   blocks?: MessageBlock[]; // structured blocks built during streaming
   attachments?: MessageAttachment[]; // file attachments (images, PDFs)
+  /** Set when the user sent only files with no typed text — `content` is
+   * then a derived label for the session title, not user-authored text,
+   * and shouldn't be rendered in the bubble. */
+  attachmentOnly?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,28 +418,46 @@ function saveMessagesToStorage(sessionId: string, messages: StructuredMessage[])
   } catch { /* quota exceeded — best-effort */ }
 }
 
+/** Best-effort check for messages that were sent files-only. The backend
+ * doesn't persist attachmentOnly, so when localStorage is absent we infer
+ * it: user message with attachments whose content matches the derived label
+ * (or the legacy '(attached files)' fallback). */
+function inferAttachmentOnly(msg: StructuredMessage): boolean {
+  if (msg.role !== 'user' || !msg.attachments?.length) return false;
+  if (msg.content === '(attached files)') return true;
+  return msg.content === attachmentsLabel(msg.attachments.map(a => a.filename));
+}
+
 function restoreMessages(sessionId: string, backendMessages: StructuredMessage[]): StructuredMessage[] {
+  // Infer attachmentOnly on backend messages first (for legacy rows + when
+  // localStorage is empty on a fresh browser).
+  const withInferred = backendMessages.map(m =>
+    m.role === 'user' && m.attachments?.length && inferAttachmentOnly(m)
+      ? { ...m, attachmentOnly: true }
+      : m
+  );
   try {
     const stored = localStorage.getItem(`chat-data-${sessionId}`);
-    if (!stored) return backendMessages;
+    if (!stored) return withInferred;
     const local: StructuredMessage[] = JSON.parse(stored);
 
     // Backend is authoritative for message content; localStorage provides
-    // blocks and any trailing partial messages the backend never received
-    // (e.g. an assistant response interrupted by abort).
-    const merged: StructuredMessage[] = backendMessages.map((msg, i) => ({
+    // blocks, attachmentOnly, and any trailing partial messages the backend
+    // never received (e.g. an assistant response interrupted by abort).
+    const merged: StructuredMessage[] = withInferred.map((msg, i) => ({
       ...msg,
       blocks: local[i]?.blocks,
+      attachmentOnly: local[i]?.attachmentOnly ?? msg.attachmentOnly,
     }));
 
     // Append messages that exist locally but not in the backend
-    for (let i = backendMessages.length; i < local.length; i++) {
+    for (let i = withInferred.length; i < local.length; i++) {
       merged.push(local[i]);
     }
 
     return merged;
   } catch {
-    return backendMessages;
+    return withInferred;
   }
 }
 
@@ -713,6 +794,7 @@ export default function ChatPanel({ sessionId, newChatNonce, onSessionChange, ag
       role: 'user',
       content: userText,
       attachments: attachmentRefs,
+      attachmentOnly: !trimmed,  // no typed text → bubble skips content
     };
     // Re-pin on send so the new assistant response auto-scrolls even if
     // the user had scrolled up earlier in the conversation.
@@ -906,100 +988,67 @@ export default function ChatPanel({ sessionId, newChatNonce, onSessionChange, ag
             </div>
           )}
 
-          {messages.map((msg, i) => (
-            <div
-              key={i}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              <div
-                className={
-                  msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'
-                }
-              >
-                <div className="text-sm leading-relaxed prose prose-sm max-w-none
-                              prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5
-                              prose-strong:text-inherit prose-headings:text-inherit
-                              prose-headings:text-base prose-headings:mt-2 prose-headings:mb-1">
-                  {msg.role === 'assistant' ? (
-                    msg.blocks && msg.blocks.length > 0 ? (
-                      <>
-                        {msg.blocks.map((block, idx) =>
-                          block.type === 'text' ? (
-                            <ReactMarkdown key={idx} remarkPlugins={[remarkGfm]}>{block.content}</ReactMarkdown>
-                          ) : block.type === 'thinking' ? (
-                            <ThinkingBlock key={idx} content={block.content} />
-                          ) : block.type === 'tool_use' ? (
-                            <ToolUseBlock
-                              key={idx}
-                              name={block.name || 'tool'}
-                              content={block.content}
-                              isStreaming={isStreaming && i === messages.length - 1 && idx === msg.blocks!.length - 1}
-                              validation={block.validation}
-                              artifact={block.artifact}
-                              onOpenArtifact={(ref) => setOpenArtifact({ type: 'artifact', id: ref.id })}
-                            />
-                          ) : null
-                        )}
-                      </>
-                    ) : (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                    )
-                  ) : (
-                    <>
-                      {msg.attachments && msg.attachments.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mb-2 max-h-32 overflow-y-auto pr-1">
-                          {msg.attachments.map((att, ai) => {
-                            if (att.content_type.startsWith('image/')) {
-                              return (
-                                <a key={ai} href={getUploadUrl(att.file_id)} target="_blank" rel="noopener noreferrer">
-                                  <img
-                                    src={getUploadUrl(att.file_id)}
-                                    alt={att.filename}
-                                    className="max-w-[200px] max-h-[150px] rounded-lg object-cover border border-white/30"
+          {messages.map((msg, i) => {
+            // Render attachments as separate cards above the bubble (claude.ai
+            // style) — not chips crammed inside it. If the user sent only files,
+            // the bubble is skipped since `content` is just a derived label
+            // for the session title, not user-authored text.
+            const hasBubble = msg.role !== 'user' || !msg.attachmentOnly;
+            return (
+              <div key={i} className="space-y-2">
+                {msg.role === 'user' && msg.attachments && msg.attachments.length > 0 && (
+                  <UserAttachmentGroup
+                    attachments={msg.attachments}
+                    extractionStatus={extractionStatus}
+                    onOpenSpreadsheet={(id) => setOpenArtifact({ type: 'upload', id })}
+                  />
+                )}
+                {hasBubble && (
+                  <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-agent'}>
+                      <div className="text-sm leading-relaxed prose prose-sm max-w-none
+                                    prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5
+                                    prose-strong:text-inherit prose-headings:text-inherit
+                                    prose-headings:text-base prose-headings:mt-2 prose-headings:mb-1">
+                        {msg.role === 'assistant' ? (
+                          msg.blocks && msg.blocks.length > 0 ? (
+                            <>
+                              {msg.blocks.map((block, idx) =>
+                                block.type === 'text' ? (
+                                  <ReactMarkdown key={idx} remarkPlugins={[remarkGfm]}>{block.content}</ReactMarkdown>
+                                ) : block.type === 'thinking' ? (
+                                  <ThinkingBlock key={idx} content={block.content} />
+                                ) : block.type === 'tool_use' ? (
+                                  <ToolUseBlock
+                                    key={idx}
+                                    name={block.name || 'tool'}
+                                    content={block.content}
+                                    isStreaming={isStreaming && i === messages.length - 1 && idx === msg.blocks!.length - 1}
+                                    validation={block.validation}
+                                    artifact={block.artifact}
+                                    onOpenArtifact={(ref) => setOpenArtifact({ type: 'artifact', id: ref.id })}
                                   />
-                                </a>
-                              );
-                            }
-                            const extStatus = extractionStatus[att.file_id];
-                            const processing = extStatus === 'pending' && (
-                              <span className="text-[10px] opacity-70 animate-pulse ml-0.5">processing&hellip;</span>
-                            );
-                            if (isSpreadsheet(att.content_type) || isSpreadsheet(att.filename)) {
-                              return (
-                                <button
-                                  key={ai}
-                                  onClick={() => setOpenArtifact({ type: 'upload', id: att.file_id })}
-                                  className="flex items-center gap-1.5 bg-white/20 hover:bg-white/30 rounded-lg px-3 py-1.5 text-xs transition-colors"
-                                  title="View spreadsheet"
-                                >
-                                  <span className="text-sm leading-none">{fileTypeIcon(att.content_type, att.filename)}</span>
-                                  {att.filename}
-                                  {processing}
-                                </button>
-                              );
-                            }
-                            return (
-                              <div key={ai} className="flex items-center gap-1.5 bg-white/20 rounded-lg px-3 py-1.5 text-xs">
-                                <span className="text-sm leading-none">{fileTypeIcon(att.content_type, att.filename)}</span>
-                                {att.filename}
-                                {processing}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                      <p className="whitespace-pre-wrap">{msg.content}</p>
-                    </>
-                  )}
-                  {isStreaming &&
-                    i === messages.length - 1 &&
-                    msg.role === 'assistant' && (
-                      <span className="streaming-cursor" />
-                    )}
-                </div>
+                                ) : null
+                              )}
+                            </>
+                          ) : (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                          )
+                        ) : (
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                        )}
+                        {isStreaming &&
+                          i === messages.length - 1 &&
+                          msg.role === 'assistant' && (
+                            <span className="streaming-cursor" />
+                          )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {error && (
             <div className="bg-brand-orange-100 border border-brand-orange-500/20 text-brand-orange-600 rounded-lg px-4 py-3 text-sm">
