@@ -380,13 +380,18 @@ async def save_upload(
     file_path: str,
     size_bytes: int,
     session_id: str | None = None,
+    initial_status: str = "pending",
 ) -> dict[str, Any]:
-    """Persist an upload record."""
+    """Persist an upload record.
+
+    initial_status: 'pending' for types that need background extraction,
+    'done' for native types (images/PDFs) that are ready immediately.
+    """
     db = await get_db()
     await db.execute(
-        """INSERT INTO uploads (id, original_filename, content_type, file_path, size_bytes, session_id)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (upload_id, original_filename, content_type, file_path, size_bytes, session_id),
+        """INSERT INTO uploads (id, original_filename, content_type, file_path, size_bytes, session_id, extraction_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (upload_id, original_filename, content_type, file_path, size_bytes, session_id, initial_status),
     )
     await db.commit()
     return {

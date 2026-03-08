@@ -133,8 +133,9 @@ def test_upload_text_file_schedules_extraction(client):
 
 
 def test_upload_native_image_skips_extraction(client):
-    """Native types (image/png) bypass the background task entirely —
-    extraction_status stays at the DB default ('pending').
+    """Native types (image/png) bypass the background task — no extractor
+    runs — but the upload row is inserted with status='done' so the
+    frontend's polling loop sees the file as ready immediately.
     """
     resp = _run(client.post(
         "/upload",
@@ -143,8 +144,9 @@ def test_upload_native_image_skips_extraction(client):
     assert resp.status_code == 200
     file_id = resp.json()["id"]
 
-    # Give the loop a few turns — if a background task WAS wrongly scheduled,
-    # this would let it run and flip status to done/error.
+    # Give the loop a few turns — if a background task WAS wrongly scheduled
+    # for a native type, this would let it run and flip status to error
+    # (image/png has no registered extractor).
     async def _settle():
         for _ in range(5):
             await asyncio.sleep(0)
@@ -153,12 +155,31 @@ def test_upload_native_image_skips_extraction(client):
     resp = _run(client.get(f"/uploads/{file_id}/extraction"))
     assert resp.status_code == 200
     body = resp.json()
-    # Native types skip extraction: status is still the DB DEFAULT 'pending'.
-    # No task ever ran, so there's no text, no meta, no error.
-    assert body["status"] == "pending"
+    # Native types are ready immediately: status='done', no extraction content.
+    assert body["status"] == "done"
     assert body["text_preview"] == ""
     assert body["error"] is None
     assert body["image_count"] == 0
+
+
+def test_upload_native_by_extension_skips_extraction(client):
+    """Same as above but triggered by file extension when the browser sends
+    a generic content-type (e.g. application/octet-stream)."""
+    resp = _run(client.post(
+        "/upload",
+        files={"file": ("photo.jpeg", _TINY_PNG, "application/octet-stream")},
+    ))
+    assert resp.status_code == 200
+    file_id = resp.json()["id"]
+
+    async def _settle():
+        for _ in range(5):
+            await asyncio.sleep(0)
+    _run(_settle())
+
+    body = _run(client.get(f"/uploads/{file_id}/extraction")).json()
+    assert body["status"] == "done"
+    assert body["error"] is None
 
 
 def test_health_reports_transcription_status(client):

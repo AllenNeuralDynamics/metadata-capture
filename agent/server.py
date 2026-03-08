@@ -23,17 +23,20 @@ logger = logging.getLogger(__name__)
 
 UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
 
+# Extensions corresponding to NATIVE_TYPES — used as the extension fallback
+# for native files that arrive with a generic content-type like
+# application/octet-stream.
+_NATIVE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"})
+
 # Derive allowed types from the extractor registry so server.py never drifts
 # from extractors.py. NATIVE_TYPES are the formats Claude sees directly
 # (images, PDF); everything in EXTRACTORS/EXT_EXTRACTORS goes through the
-# upload-time background extraction pipeline.
+# upload-time background extraction pipeline. Native extensions are included
+# in the extension fallback so .png/.pdf etc. pass validation even when the
+# browser reports a generic MIME type.
 ALLOWED_CONTENT_TYPES = NATIVE_TYPES | set(EXTRACTORS.keys())
-ALLOWED_EXTENSIONS = set(EXT_EXTRACTORS.keys())
+ALLOWED_EXTENSIONS = set(EXT_EXTRACTORS.keys()) | _NATIVE_EXTS
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB — video needs headroom
-
-# Extensions corresponding to NATIVE_TYPES — used to skip extraction when a
-# native file arrives with a generic content-type like application/octet-stream.
-_NATIVE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"})
 
 # Audio/video: fail fast at upload if ffmpeg/whisper are unavailable rather
 # than accepting the file and erroring 120s later at chat time.
@@ -341,6 +344,11 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(contents)
 
+    # Native types (images, PDFs) go directly to Claude at chat time — no
+    # extraction pipeline. Mark them 'done' at insert so the frontend's
+    # polling loop sees them as ready immediately.
+    is_native = content_type in NATIVE_TYPES or ext in _NATIVE_EXTS
+
     result = await save_upload(
         upload_id=file_id,
         original_filename=file.filename or "unknown",
@@ -348,12 +356,13 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
         file_path=str(dest),
         size_bytes=len(contents),
         session_id=session_id,
+        initial_status="done" if is_native else "pending",
     )
 
     # Schedule extraction for non-native types. The task runs after this
     # response is returned; the DB row starts as 'pending' and flips to
     # 'done'/'error' when the task finishes.
-    if content_type not in NATIVE_TYPES and ext not in _NATIVE_EXTS:
+    if not is_native:
         asyncio.create_task(_extract_and_store(file_id, dest, content_type))
 
     return result
