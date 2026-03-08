@@ -15,3 +15,4 @@ next-env.d.ts
 dist/
 agent/models/
 .claude/
+.playwright-mcp/
