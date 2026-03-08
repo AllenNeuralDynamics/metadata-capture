@@ -23,7 +23,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .db.database import close_db, init_db
-from .service import AVAILABLE_MODELS, DEFAULT_MODEL, chat, get_session_messages, get_sessions
+from .sdk_client_pool import init_pool
+from .service import AVAILABLE_MODELS, DEFAULT_MODEL, _get_options, chat, get_session_messages, get_sessions
 from .tools.extractors import EXTRACTORS, EXT_EXTRACTORS, NATIVE_TYPES
 from .tools.spreadsheet import SPREADSHEET_CONTENT_TYPES, parse_spreadsheet
 
@@ -56,10 +57,36 @@ load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise the database on startup, close on shutdown."""
+    """Initialise DB + warm the SDK client pool on startup.
+
+    The pool pre-connects a ClaudeSDKClient during startup so the ~4s
+    subprocess spawn happens once, not per request. If the connect fails
+    (no API key, missing MCP deps, etc.), we log and continue — chat()
+    falls back to one-shot query() which has the same failure surface.
+    """
     await init_db()
+
+    if os.environ.get("USE_SDK_POOL", "1") == "1":
+        pool = init_pool(_get_options)
+        try:
+            await pool.warmup()
+        except Exception:
+            logger.exception(
+                "SDK client pool warmup failed — chat() will fall back to "
+                "per-request query() (~4s slower). Set USE_SDK_POOL=0 to silence."
+            )
+
     yield
     await close_db()
+    # Pool shutdown: disconnect() is best-effort — the subprocess dies
+    # with the worker anyway on SIGTERM.
+    from .sdk_client_pool import get_pool
+    p = get_pool()
+    if p is not None:
+        try:
+            await p.shutdown()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="AIND Metadata Capture Agent", lifespan=lifespan)

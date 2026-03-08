@@ -270,15 +270,21 @@ The SDK's `query()` spawns a fresh `claude` CLI subprocess per chat request, whi
 - Dropped unused tools from `allowed_tools`: `count_records`, `aggregation_retrieval`, `get_summary`, `flatten_records`, `identify_nwb_contents_*` — saves ~1000 tokens of tool schema per API turn.
 - `CHAT_PROFILE=1` env var enables per-stage latency logging (context gather → query() iter → first text delta → ResultMessage).
 
-Current numbers (Haiku, minimal prompt): ~4s to first iter, ~5-6s TTFT. The remaining ~4s is CLI subprocess spawn and cannot be eliminated without switching to a persistent `ClaudeSDKClient` — see "Future Work".
+**Persistent SDK client pool** (`agent/sdk_client_pool.py`): a background task owns a warm `ClaudeSDKClient`, eliminating the ~4s subprocess spawn on requests 2+. The SDK's async-context binding restriction (client's anyio TaskGroup tied to where `connect()` was called) means we can't share a client across FastAPI handlers directly — instead the worker task exchanges messages with handlers via `asyncio.Queue`. The `stream_events` contextvar (capture_metadata validation results) is bridged by having the worker set its own queue and forward events as `{"tool_event": ...}` dicts interleaved in the output.
 
-`AIND_MCP_PYTHON` env var overrides the Python used to run the AIND MCP (must have `aind-data-access-api` + `fastmcp` installed). `SKIP_AIND_MCP=1` disables the server entirely for perf testing.
+Current numbers (Haiku, minimal prompt, pool warm): **TTFT ~0.8s**, first iter ~20ms. First request after startup still pays ~2s (API prompt-cache cold).
+
+Env vars:
+- `USE_SDK_POOL=0` — disable pool, fall back to per-request `query()` (~4s slower)
+- `CHAT_PROFILE=1` — per-stage latency logging
+- `AIND_MCP_PYTHON` — override the Python used for AIND MCP (must have `aind-data-access-api` + `fastmcp`)
+- `SKIP_AIND_MCP=1` — disable AIND MCP entirely for perf isolation
 
 ---
 
 ## Future Work
-- **Persistent `ClaudeSDKClient` per chat session** — would eliminate the ~4s CLI subprocess spawn on every request after the first. SDK v0.1.22 has an async-context binding restriction (client's anyio task group is tied to the context where `connect()` was called), so this needs a background task per session that owns the client and exchanges messages via `asyncio.Queue`. See SDK `client.py:55-62`.
-- **AIND MCP as HTTP/SSE** — run `fastmcp` in `transport="http"` mode as a long-lived daemon; CLI connects over socket instead of stdio spawn. Less architectural than ClaudeSDKClient but shaves the MCP startup entirely.
+- **AIND MCP as HTTP/SSE** — run `fastmcp` in `transport="http"` mode as a long-lived daemon; CLI connects over socket instead of stdio spawn. Would further shave warmup (pool still has to spawn the stdio MCP on reconnect).
+- **Pool auto-reconnect** — currently a failed query clears `is_warm` and callers fall back to `query()`. A fancier pool would reconnect transparently.
 - MCP write access to AIND MongoDB
 - Cloud deployment (Cloud Run)
 - Allen SSO authentication

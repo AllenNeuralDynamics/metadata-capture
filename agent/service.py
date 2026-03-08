@@ -19,6 +19,7 @@ from claude_agent_sdk.types import (
 )
 
 from .prompts.system_prompt import SYSTEM_PROMPT
+from .sdk_client_pool import get_pool
 from .shared import stream_events
 from .tools.capture_mcp import capture_server
 from .tools.metadata_store import (
@@ -118,9 +119,14 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
             "env": {"PYTHONPATH": str(mcp_src)},
         }
 
+    # Built-in tools (Bash/Read/Glob/Grep/WebFetch/WebSearch) dropped — the
+    # capture workflow is purely MCP-driven (capture_metadata + AIND schema
+    # lookups). Each built-in adds a few hundred tokens of tool schema to
+    # every API turn for zero value. Read stays so the agent can inspect
+    # uploaded files on disk if base64 isn't enough (rare edge case).
     opts = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        allowed_tools=["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"] + capture_tools + aind_mcp_tools,
+        allowed_tools=["Read"] + capture_tools + aind_mcp_tools,
         max_turns=5,
         model=model if model in AVAILABLE_MODELS else DEFAULT_MODEL,
         mcp_servers=mcp_servers,
@@ -303,6 +309,149 @@ async def _build_multimodal_content(
     return content_blocks
 
 
+# ---------------------------------------------------------------------------
+# SDK message → SSE translation
+# ---------------------------------------------------------------------------
+#
+# Both the warm-pool path and the fallback query() path emit the same
+# SDK message types. The only difference is where tool-handler events
+# (validation/artifact) come from:
+#   - query() path: we set stream_events locally; tool handlers run in
+#     our task via the SDK-MCP bridge and push to our queue. We drain
+#     between SDK messages.
+#   - pool path: the worker task owns stream_events; it wraps events
+#     in {"tool_event": ...} dicts and interleaves them in its output.
+#
+# _translate_to_sse() handles both by checking for the dict wrapper
+# first, otherwise treating the item as an SDK message.
+
+
+async def _query_with_tool_events(prompt_content, options) -> AsyncIterator[Any]:
+    """Run query() and interleave tool-handler events into the stream.
+
+    Yields the same mix _translate_to_sse() expects from the pool:
+    SDK messages + {"tool_event": {...}} dicts.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    token = stream_events.set(queue)
+    try:
+        async for message in query(prompt=_create_message_stream(prompt_content), options=options):
+            # Drain tool events between SDK messages (validation results
+            # arrive after the tool_use AssistantMessage, before the
+            # next text response).
+            while not queue.empty():
+                yield {"tool_event": queue.get_nowait()}
+            yield message
+        # Final drain after ResultMessage
+        while not queue.empty():
+            yield {"tool_event": queue.get_nowait()}
+    finally:
+        stream_events.reset(token)
+
+
+async def _translate_to_sse(
+    raw_iter: AsyncIterator[Any],
+    full_response: list[str],
+    _t,  # profiler timestamp fn or None
+) -> AsyncIterator[dict[str, Any]]:
+    """Translate SDK messages + tool events into SSE event dicts.
+
+    `full_response` is mutated in place so the caller can persist the
+    complete assistant text after the stream ends. `_t` is the
+    CHAT_PROFILE timestamp closure or None.
+    """
+    # Tracking state for matching tool_use IDs to their results and
+    # backfilling text that didn't arrive via deltas.
+    last_capture_tool_use_id: str | None = None
+    last_render_tool_use_id: str | None = None
+    streamed_len_before_msg = 0
+    first_delta_logged = False
+    _first_iter = True
+
+    async for item in raw_iter:
+        if _t and _first_iter:
+            print(f"[profile] +{_t():.0f}ms: first message from iterator (type={type(item).__name__})", flush=True)
+            _first_iter = False
+
+        # Tool-handler event forwarded by pool worker (or drained
+        # inline by _query_with_tool_events). Route to the matching
+        # tool_use_id tracked from earlier content_block_start.
+        if isinstance(item, dict) and "tool_event" in item:
+            evt = item["tool_event"]
+            kind = evt.get("kind")
+            if kind == "validation" and last_capture_tool_use_id:
+                yield {"tool_result": {
+                    "tool_use_id": last_capture_tool_use_id,
+                    "validation": evt.get("data"),
+                }}
+                last_capture_tool_use_id = None
+            elif kind == "artifact":
+                yield {"artifact": {
+                    **evt.get("artifact", {}),
+                    "tool_use_id": last_render_tool_use_id,
+                }}
+                last_render_tool_use_id = None
+            continue
+
+        # SDK message objects
+        message = item
+        if isinstance(message, StreamEvent):
+            event = message.event
+            event_type = event.get("type")
+
+            if event_type == "content_block_start":
+                block = event.get("content_block", {})
+                block_type = block.get("type")
+                if block_type == "thinking":
+                    yield {"thinking_start": True}
+                elif block_type == "tool_use":
+                    tool_name = block.get("name", "")
+                    tool_id = block.get("id", "")
+                    if "capture_metadata" in tool_name:
+                        last_capture_tool_use_id = tool_id
+                    elif "render_artifact" in tool_name:
+                        last_render_tool_use_id = tool_id
+                    yield {"tool_use_start": {"name": tool_name, "id": tool_id}}
+
+            elif event_type == "content_block_delta":
+                delta = event.get("delta", {})
+                delta_type = delta.get("type")
+                if delta_type == "text_delta":
+                    text = delta["text"]
+                    if _t and not first_delta_logged:
+                        print(f"[profile] +{_t():.0f}ms: FIRST TEXT DELTA ({len(text)} chars) — this is TTFT", flush=True)
+                        first_delta_logged = True
+                    full_response.append(text)
+                    yield {"content": text}
+                elif delta_type == "thinking_delta":
+                    yield {"thinking": delta.get("thinking", "")}
+                elif delta_type == "input_json_delta":
+                    yield {"tool_use_input": delta.get("partial_json", "")}
+
+            elif event_type == "content_block_stop":
+                yield {"block_stop": True}
+
+        elif isinstance(message, AssistantMessage):
+            # Backfill text that didn't arrive via deltas (e.g.
+            # post-tool turns where streaming skipped a block).
+            msg_text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+            streamed_since = "".join(full_response[streamed_len_before_msg:])
+            if msg_text and msg_text != streamed_since:
+                unstreamed = msg_text[len(streamed_since):] if msg_text.startswith(streamed_since) else msg_text
+                if unstreamed:
+                    logger.info("Yielding %d chars of unstreamed text", len(unstreamed))
+                    full_response.append(unstreamed)
+                    yield {"content": unstreamed}
+            streamed_len_before_msg = len(full_response)
+
+        elif isinstance(message, ResultMessage):
+            if _t:
+                out_chars = sum(len(s) for s in full_response)
+                otps = (out_chars / 4) / (message.duration_ms / 1000) if message.duration_ms else 0
+                print(f"[profile] +{_t():.0f}ms: ResultMessage (turns={message.num_turns} sdk_duration={message.duration_ms}ms out={out_chars} chars ~{out_chars // 4} tok, OTPS~{otps:.1f} tok/s)", flush=True)
+            logger.info("Query complete: %d turns, %s ms", message.num_turns, message.duration_ms)
+
+
 async def chat(
     session_id: str,
     user_message: str,
@@ -388,126 +537,36 @@ async def chat(
         )
         print(f"[profile] +{_t():.0f}ms: prompt built ({prompt_len} chars, ~{prompt_len // 4} tokens)", flush=True)
 
-    # Run the agent with streaming input (required for custom MCP tools)
-    options = _get_options(model)
     full_response: list[str] = []
-    first_delta_logged = False
 
-    # Track how much text was streamed via deltas so we can detect
-    # AssistantMessages whose text wasn't streamed (e.g. post-tool turns).
-    streamed_len_before_msg = 0
+    # Warm-pool fast path: skips the ~4s subprocess spawn on requests
+    # 2+. Falls back to query() if the pool is down or disabled.
+    pool = get_pool()
+    use_pool = pool is not None and pool.is_warm and os.environ.get("USE_SDK_POOL", "1") == "1"
 
-    # Set up an events queue so tool handlers (capture_metadata,
-    # render_artifact) can push results back to us for streaming.
-    queue: asyncio.Queue = asyncio.Queue()
-    token = stream_events.set(queue)
-    last_capture_tool_use_id: str | None = None
-    last_render_tool_use_id: str | None = None
+    if _PROFILE:
+        path = "pool" if use_pool else "query()"
+        print(f"[profile] +{_t():.0f}ms: entering {path}", flush=True)
+
+    if use_pool:
+        # Pool path: tool events arrive interleaved as {"tool_event": ...}
+        # dicts — the worker task owns the stream_events queue, not us.
+        raw_iter = pool.submit(prompt_content, model)
+    else:
+        # Fallback: spawn a fresh subprocess per request (~4s). We own
+        # the stream_events queue here — tool handlers run in our
+        # context via the SDK-MCP bridge.
+        options = _get_options(model)
+        raw_iter = _query_with_tool_events(prompt_content, options)
 
     try:
-        if _PROFILE:
-            print(f"[profile] +{_t():.0f}ms: entering query() — subprocess spawn starts here", flush=True)
-        _first_iter = True
-        async for message in query(prompt=_create_message_stream(prompt_content), options=options):
-            if _PROFILE and _first_iter:
-                print(f"[profile] +{_t():.0f}ms: first message from query() iterator (type={type(message).__name__})", flush=True)
-                _first_iter = False
-            # Drain any pending events pushed by tool handlers. These arrive
-            # after the tool executes (between the tool_use AssistantMessage
-            # and the next text response).
-            while not queue.empty():
-                evt = queue.get_nowait()
-                kind = evt.get("kind")
-                if kind == "validation" and last_capture_tool_use_id:
-                    yield {"tool_result": {
-                        "tool_use_id": last_capture_tool_use_id,
-                        "validation": evt.get("data"),
-                    }}
-                    last_capture_tool_use_id = None
-                elif kind == "artifact":
-                    yield {"artifact": {
-                        **evt.get("artifact", {}),
-                        "tool_use_id": last_render_tool_use_id,
-                    }}
-                    last_render_tool_use_id = None
-
-            if isinstance(message, StreamEvent):
-                event = message.event
-                event_type = event.get("type")
-
-                if event_type == "content_block_start":
-                    block = event.get("content_block", {})
-                    block_type = block.get("type")
-                    if block_type == "thinking":
-                        yield {"thinking_start": True}
-                    elif block_type == "tool_use":
-                        tool_name = block.get("name", "")
-                        tool_id = block.get("id", "")
-                        if "capture_metadata" in tool_name:
-                            last_capture_tool_use_id = tool_id
-                        elif "render_artifact" in tool_name:
-                            last_render_tool_use_id = tool_id
-                        yield {"tool_use_start": {"name": tool_name, "id": tool_id}}
-
-                elif event_type == "content_block_delta":
-                    delta = event.get("delta", {})
-                    delta_type = delta.get("type")
-                    if delta_type == "text_delta":
-                        text = delta["text"]
-                        if _PROFILE and not first_delta_logged:
-                            print(f"[profile] +{_t():.0f}ms: FIRST TEXT DELTA ({len(text)} chars) — this is TTFT", flush=True)
-                            first_delta_logged = True
-                        full_response.append(text)
-                        yield {"content": text}
-                    elif delta_type == "thinking_delta":
-                        yield {"thinking": delta.get("thinking", "")}
-                    elif delta_type == "input_json_delta":
-                        yield {"tool_use_input": delta.get("partial_json", "")}
-
-                elif event_type == "content_block_stop":
-                    yield {"block_stop": True}
-
-            elif isinstance(message, AssistantMessage):
-                # Check if this message has text that wasn't already streamed.
-                msg_text_parts: list[str] = []
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        msg_text_parts.append(block.text)
-
-                msg_text = "".join(msg_text_parts)
-                streamed_since = "".join(full_response[streamed_len_before_msg:])
-
-                if msg_text and msg_text != streamed_since:
-                    unstreamed = msg_text
-                    if streamed_since and msg_text.startswith(streamed_since):
-                        unstreamed = msg_text[len(streamed_since):]
-                    if unstreamed:
-                        logger.info(
-                            "Yielding %d chars of unstreamed text from AssistantMessage",
-                            len(unstreamed),
-                        )
-                        full_response.append(unstreamed)
-                        yield {"content": unstreamed}
-
-                streamed_len_before_msg = len(full_response)
-
-            elif isinstance(message, ResultMessage):
-                if _PROFILE:
-                    out_chars = sum(len(s) for s in full_response)
-                    otps = (out_chars / 4) / (message.duration_ms / 1000) if message.duration_ms else 0
-                    print(f"[profile] +{_t():.0f}ms: ResultMessage (turns={message.num_turns} sdk_duration={message.duration_ms}ms out={out_chars} chars ~{out_chars // 4} tok, OTPS~{otps:.1f} tok/s)", flush=True)
-                logger.info(
-                    "Query complete: %d turns, %s ms",
-                    message.num_turns,
-                    message.duration_ms,
-                )
+        async for sse_evt in _translate_to_sse(raw_iter, full_response, _t if _PROFILE else None):
+            yield sse_evt
     except Exception as exc:
         logger.exception("Agent query failed for session %s: %s", session_id, exc)
         error_msg = "I encountered an error processing your request. Please try again."
         full_response.append(error_msg)
         yield {"content": error_msg}
-    finally:
-        stream_events.reset(token)
 
     # Save the assistant's complete response
     assistant_text = "".join(full_response)
