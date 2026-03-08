@@ -1,28 +1,35 @@
 /**
  * EditableCell state machine.
  *
- * Ported from claude-ai's KnowledgeBases/EditableField.tsx. Four states:
- * isEditing / draft / isSaving / error. The machine's job is to make
- * the commit semantics unambiguous — especially the two subtle ones:
+ * Four states: isEditing / draft / isSaving / error. The machine's job is
+ * to make the commit semantics unambiguous — especially the two subtle ones:
  *
  *   1. No-change commit skips the network entirely (not "returns early
  *      after a 200", literally never calls onCommit).
  *   2. Save failure stays in edit mode with the error shown, so the user
  *      can fix their input and retry. Reverting silently would lose work.
+ *
+ * Rendering note: EditableCell clones a `defaultTd` (the upstream claude.ai
+ * <td>) to preserve its styling. The tests supply a minimal stub <td>.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { EditableCell } from '../SpreadsheetViewer';
 
-// EditableCell renders a <td>, which needs a table ancestor for jsdom's
+// EditableCell clones a <td>, which needs a table ancestor for jsdom's
 // parser to keep it. Wrap in a minimal table.
 const wrap = (cell: React.ReactElement) => (
   <table><tbody><tr>{cell}</tr></tbody></table>
 );
 
+// In production defaultTd is the upstream TableView's fully-styled <td>.
+// For tests we only need its shape (a <td> element to clone).
+const stubTd = <td className="border border-gray-300 px-2 py-1 text-sm cursor-cell" />;
+
 const baseProps = {
-  value: 'wt',
+  defaultTd: stubTd,
+  value: 'wt' as string | null,
   mode: 'text' as const,
   isSelected: false,
   onSelect: () => {},
