@@ -140,6 +140,16 @@ class SDKClientPool:
         opts = self._options_factory(None)
         client = ClaudeSDKClient(options=opts)
 
+        # Set stream_events BEFORE connect(). connect() spawns the SDK's
+        # stdio reader task, which handles tool callbacks from the claude
+        # CLI subprocess. That task inherits the contextvar value at spawn
+        # time — if we set it in _handle() (after the reader task already
+        # exists), the reader's copy stays None and handler pushes silently
+        # drop. A single long-lived queue works because size=1 serialises
+        # requests; _handle() drains it fully between runs.
+        self._tool_q: asyncio.Queue = asyncio.Queue()
+        token = stream_events.set(self._tool_q)
+
         t0 = time.perf_counter()
         await client.connect()
         self._connect_ms = (time.perf_counter() - t0) * 1000
@@ -152,6 +162,7 @@ class SDKClientPool:
                     break
                 await self._handle(client, work)
         finally:
+            stream_events.reset(token)
             try:
                 await client.disconnect()
             except Exception:
@@ -166,12 +177,11 @@ class SDKClientPool:
         would reconnect here, but reconnect races with the caller
         already having given up, so simpler is better.
         """
-        # Bridge the stream_events contextvar: tool handlers (which run
-        # in THIS task's context via the SDK-MCP bridge) push to our
-        # queue; we forward them as dicts so the caller can tell them
-        # apart from SDK messages.
-        tool_q: asyncio.Queue = asyncio.Queue()
-        token = stream_events.set(tool_q)
+        # Flush any stale events from the last request — shouldn't happen
+        # since _handle drains fully before returning, but defensive.
+        tool_q = self._tool_q
+        while not tool_q.empty():
+            tool_q.get_nowait()
 
         try:
             if work.model:
@@ -208,8 +218,6 @@ class SDKClientPool:
             # Subprocess may be dead. Clear ready flag so callers know
             # to fall back; a future warmup() call will reconnect.
             self._ready.clear()
-        finally:
-            stream_events.reset(token)
 
 
 # Module-level singleton — one pool per worker process. warmup() is
