@@ -549,13 +549,12 @@ async def chat(
 
     full_response: list[str] = []
 
-    # Warm-pool fast path: skips the ~4s subprocess spawn on requests
-    # 2+. Falls back to query() if the pool is down or disabled.
     pool = get_pool()
     use_pool = pool is not None and pool.is_warm and os.environ.get("USE_SDK_POOL", "1") == "1"
+    path = "pool" if use_pool else "query()"
+    logger.info("Chat path=%s for session %s", path, session_id)
 
     if _PROFILE:
-        path = "pool" if use_pool else "query()"
         print(f"[profile] +{_t():.0f}ms: entering {path}", flush=True)
 
     if use_pool:
