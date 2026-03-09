@@ -59,8 +59,6 @@ app.prepare().then(() => {
           }
         });
       });
-    } else {
-      socket.destroy();
     }
   });
 
