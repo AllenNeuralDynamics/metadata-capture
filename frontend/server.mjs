@@ -17,7 +17,8 @@ app.prepare().then(() => {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
-    if (req.url === '/ws/chat') {
+    const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+    if (pathname === '/ws/chat') {
       wss.handleUpgrade(req, socket, head, (clientWs) => {
         const backendWs = new WebSocket('ws://localhost:8001/ws/chat');
 

@@ -149,7 +149,6 @@ export async function sendChatMessage(
     const wsUrl = `${wsProtocol}//${window.location.host}/ws/chat`;
     const ws = new WebSocket(wsUrl);
     let msgCount = 0;
-    const t0 = Date.now();
 
     const cleanup = () => {
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
@@ -177,14 +176,12 @@ export async function sendChatMessage(
       msgCount++;
       try {
         const parsed = JSON.parse(event.data);
-        console.log(`[WS] msg #${msgCount} +${Date.now() - t0}ms`, Object.keys(parsed).join(','));
 
         if (parsed.session_id) {
           sessionStorage.setItem('chat_session_id', parsed.session_id);
         }
 
         if (parsed.done) {
-          console.log(`[WS] DONE after ${msgCount} msgs, ${Date.now() - t0}ms`);
           cleanup();
           onDone();
           return;

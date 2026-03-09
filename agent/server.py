@@ -203,12 +203,8 @@ async def chat_ws(ws: WebSocket):
         model = req_data.get("model")
         attachments = req_data.get("attachments")
 
-        await ws.send_text(json.dumps({"session_id": session_id}))
-
         async for chunk in chat(session_id, message, model=model, attachments=attachments):
             await ws.send_text(json.dumps(chunk))
-
-        await ws.send_text(json.dumps({"done": True}))
     except WebSocketDisconnect:
         pass
     except Exception as exc:

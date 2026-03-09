@@ -69,7 +69,13 @@ workspace/
   - Disabled SDK client pool everywhere (USE_SDK_POOL defaults to 0): the pool's long-lived CLI subprocess loses MCP stdio connections during idle time and causes 100s+ query latency; per-request query() spawns fresh CLI+MCP processes (~4s overhead but MCP tools stay alive and queries complete in normal time)
   - Added chat path logging (pool vs query) for production diagnostics
   - Pool can be re-enabled with USE_SDK_POOL=1 env var if the underlying SDK/MCP idle issue is resolved
-  - Fixed SSE streaming buffering on Replit: replaced Next.js rewrite for /chat with an App Router API route (app/chat/route.ts) that explicitly sets X-Accel-Buffering: no and no-transform headers, preventing Replit's reverse proxy from buffering SSE events
+  - Fixed real-time streaming on Replit: Replit's reverse proxy buffers all HTTP responses (including SSE with X-Accel-Buffering: no), so switched chat to WebSocket transport which delivers frames immediately
+  - Added WebSocket endpoint `/ws/chat` to FastAPI backend (agent/server.py) — accepts JSON message, streams events as individual WS frames
+  - Created custom Node.js server (frontend/server.mjs) that proxies `/ws/chat` WebSocket upgrades to backend and passes all other requests to Next.js
+  - Frontend `sendChatMessage` in api.ts now uses native WebSocket API instead of fetch+SSE
+  - SSE `/chat` endpoint still exists on backend for non-Replit environments and curl testing
+  - `npm run dev` now runs `node server.mjs` instead of `next dev` directly
+  - Added `ws` package to frontend dependencies
   - Fixed NEXT_PUBLIC_API_URL default from 'http://localhost:8001' to '' (empty = use same-origin rewrites), preventing mixed-content HTTPS→HTTP failures in Replit iframe
 - 2026-02-27: Added offline chat protection
   - Health check state lifted to page.tsx, passed as prop to Header and ChatPanel
