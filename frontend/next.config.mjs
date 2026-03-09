@@ -9,7 +9,6 @@ const nextConfig = {
   },
   async rewrites() {
     return [
-      { source: '/chat', destination: 'http://localhost:8001/chat' },
       { source: '/records', destination: 'http://localhost:8001/records' },
       { source: '/records/:path*', destination: 'http://localhost:8001/records/:path*' },
       { source: '/sessions', destination: 'http://localhost:8001/sessions' },
