@@ -20,6 +20,7 @@ const nextConfig = {
       { source: '/artifacts/:path*', destination: 'http://localhost:8001/artifacts/:path*' },
       { source: '/schema/:path*', destination: 'http://localhost:8001/schema/:path*' },
       { source: '/debug/:path*', destination: 'http://localhost:8001/debug/:path*' },
+      { source: '/chat', destination: 'http://localhost:8001/chat' },
     ];
   },
   async headers() {

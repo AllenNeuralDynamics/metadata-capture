@@ -134,6 +134,109 @@ export async function fetchSessionArtifacts(sessionId: string): Promise<Artifact
   return res.json();
 }
 
+type ChatCallbacks = {
+  onChunk: (event: Record<string, unknown>) => void;
+  onDone: () => void;
+  onError: (err: Error) => void;
+};
+
+function handleEvent(parsed: Record<string, unknown>, cb: ChatCallbacks): 'done' | 'error' | 'continue' {
+  if (parsed.session_id) {
+    sessionStorage.setItem('chat_session_id', parsed.session_id as string);
+  }
+  if (parsed.done) { cb.onDone(); return 'done'; }
+  if (parsed.error) { cb.onError(new Error(parsed.error as string)); return 'error'; }
+  if (parsed.content || parsed.thinking_start || parsed.thinking ||
+      parsed.tool_use_start || parsed.tool_use_input || parsed.block_stop ||
+      parsed.tool_result || parsed.artifact) {
+    cb.onChunk(parsed);
+  }
+  return 'continue';
+}
+
+function sendViaWebSocket(
+  payload: Record<string, unknown>,
+  cb: ChatCallbacks,
+  signal?: AbortSignal,
+) {
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/chat`);
+  let msgCount = 0;
+
+  const cleanup = () => {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
+  };
+
+  if (signal) {
+    signal.addEventListener('abort', () => { cleanup(); cb.onDone(); });
+  }
+
+  ws.onopen = () => { ws.send(JSON.stringify(payload)); };
+
+  ws.onmessage = (event) => {
+    msgCount++;
+    try {
+      const result = handleEvent(JSON.parse(event.data), cb);
+      if (result !== 'continue') cleanup();
+    } catch {
+      cb.onChunk({ content: event.data });
+    }
+  };
+
+  ws.onerror = () => { cb.onError(new Error('WebSocket connection failed')); };
+  ws.onclose = (event) => {
+    if (!event.wasClean && msgCount === 0) {
+      cb.onError(new Error('WebSocket closed unexpectedly'));
+    }
+  };
+}
+
+async function sendViaSSE(
+  payload: Record<string, unknown>,
+  cb: ChatCallbacks,
+  signal?: AbortSignal,
+) {
+  const res = await fetch(`${API_BASE}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!res.ok) throw new Error(`Chat request failed: ${res.status}`);
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        if (data === '[DONE]') { cb.onDone(); return; }
+        try {
+          const result = handleEvent(JSON.parse(data), cb);
+          if (result !== 'continue') return;
+        } catch {
+          cb.onChunk({ content: data });
+        }
+      }
+    }
+  }
+  cb.onDone();
+}
+
 export async function sendChatMessage(
   message: string,
   sessionId: string | null,
@@ -144,75 +247,26 @@ export async function sendChatMessage(
   model?: string,
   attachments?: MessageAttachment[],
 ) {
+  const payload: Record<string, unknown> = { message };
+  if (sessionId) payload.session_id = sessionId;
+  if (model) payload.model = model;
+  if (attachments?.length) payload.attachments = attachments;
+
+  const cb: ChatCallbacks = { onChunk, onDone, onError };
+  const isReplit = window.location.hostname.includes('.replit.dev')
+    || window.location.hostname.includes('.repl.co');
+
   try {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/chat`;
-    const ws = new WebSocket(wsUrl);
-    let msgCount = 0;
-
-    const cleanup = () => {
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close();
-      }
-    };
-
-    if (signal) {
-      signal.addEventListener('abort', () => {
-        cleanup();
-        onDone();
-      });
+    if (isReplit) {
+      sendViaWebSocket(payload, cb, signal);
+    } else {
+      await sendViaSSE(payload, cb, signal);
     }
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        message,
-        ...(sessionId ? { session_id: sessionId } : {}),
-        ...(model ? { model } : {}),
-        ...(attachments?.length ? { attachments } : {}),
-      }));
-    };
-
-    ws.onmessage = (event) => {
-      msgCount++;
-      try {
-        const parsed = JSON.parse(event.data);
-
-        if (parsed.session_id) {
-          sessionStorage.setItem('chat_session_id', parsed.session_id);
-        }
-
-        if (parsed.done) {
-          cleanup();
-          onDone();
-          return;
-        }
-
-        if (parsed.error) {
-          cleanup();
-          onError(new Error(parsed.error));
-          return;
-        }
-
-        if (parsed.content || parsed.thinking_start || parsed.thinking ||
-            parsed.tool_use_start || parsed.tool_use_input || parsed.block_stop ||
-            parsed.tool_result || parsed.artifact) {
-          onChunk(parsed);
-        }
-      } catch {
-        onChunk({ content: event.data });
-      }
-    };
-
-    ws.onerror = () => {
-      onError(new Error('WebSocket connection failed'));
-    };
-
-    ws.onclose = (event) => {
-      if (!event.wasClean && msgCount === 0) {
-        onError(new Error('WebSocket closed unexpectedly'));
-      }
-    };
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      onDone();
+      return;
+    }
     onError(err as Error);
   }
 }

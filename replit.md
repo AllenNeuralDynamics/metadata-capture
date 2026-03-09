@@ -72,9 +72,10 @@ workspace/
   - Fixed real-time streaming on Replit: Replit's reverse proxy buffers all HTTP responses (including SSE with X-Accel-Buffering: no), so switched chat to WebSocket transport which delivers frames immediately
   - Added WebSocket endpoint `/ws/chat` to FastAPI backend (agent/server.py) — accepts JSON message, streams events as individual WS frames
   - Created custom Node.js server (frontend/server.mjs) that proxies `/ws/chat` WebSocket upgrades to backend and passes all other requests to Next.js
-  - Frontend `sendChatMessage` in api.ts now uses native WebSocket API instead of fetch+SSE
-  - SSE `/chat` endpoint still exists on backend for non-Replit environments and curl testing
-  - `npm run dev` now runs `node server.mjs` instead of `next dev` directly
+  - Frontend `sendChatMessage` in api.ts auto-detects Replit (hostname includes `.replit.dev` or `.repl.co`) and uses WebSocket; otherwise falls back to SSE via `/chat` rewrite
+  - SSE `/chat` endpoint still exists on backend and via Next.js rewrite for non-Replit environments
+  - `npm run dev` / `npm run start` use standard Next.js (SSE); `npm run dev:replit` / `npm run start:replit` use custom server (WebSocket)
+  - Workflow and deployment commands use `dev:replit` / `start:replit` scripts
   - Added `ws` package to frontend dependencies
   - Fixed NEXT_PUBLIC_API_URL default from 'http://localhost:8001' to '' (empty = use same-origin rewrites), preventing mixed-content HTTPS→HTTP failures in Replit iframe
 - 2026-02-27: Added offline chat protection
