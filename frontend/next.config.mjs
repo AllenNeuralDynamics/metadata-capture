@@ -5,11 +5,7 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
   env: {
-    // Use ?? not || so an explicit empty string ("use rewrites proxy") is
-    // respected. With ||, `NEXT_PUBLIC_API_URL=` falls through to the
-    // localhost:8001 default and the browser hits the wrong host when
-    // port-forwarding from a laptop.
-    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8001',
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL ?? '',
   },
   async rewrites() {
     return [
