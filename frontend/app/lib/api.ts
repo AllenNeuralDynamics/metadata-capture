@@ -254,7 +254,8 @@ export async function sendChatMessage(
 
   const cb: ChatCallbacks = { onChunk, onDone, onError };
   const isReplit = window.location.hostname.includes('.replit.dev')
-    || window.location.hostname.includes('.repl.co');
+    || window.location.hostname.includes('.repl.co')
+    || window.location.hostname.includes('.replit.app');
 
   try {
     if (isReplit) {
