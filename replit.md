@@ -58,6 +58,14 @@ workspace/
   - `agent/db/models.py`: separate `PG_TABLES` and `SQLITE_TABLES` DDL lists, shared `CREATE_INDEXES`
   - Tables: metadata_records, record_links, conversations, uploads
   - Added /artifacts rewrite to Next.js config
+- 2026-03-09: Production MCP debugging & fixes
+  - MCP subprocess env now inherits full parent env (was only PYTHONPATH, stripping PATH/credentials)
+  - Added PYTHONUNBUFFERED=1 to deployment run command for unbuffered log output
+  - Added print-based startup diagnostics (lifespan steps, MCP dir check, registration)
+  - Added /debug/mcp diagnostic endpoint (tests MCP import, API connectivity, pool status, tool list)
+  - Re-added count_records and aggregation_retrieval to allowed MCP tools (16 tools total)
+  - Updated system prompt to explicitly list aggregation tools and clarify AIND MCP vs local capture tools
+  - Added /debug rewrite to Next.js config
 - 2026-02-27: Added offline chat protection
   - Health check state lifted to page.tsx, passed as prop to Header and ChatPanel
   - Chat input disabled with "Agent is starting up..." overlay when agent offline

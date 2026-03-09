@@ -637,3 +637,40 @@ async def health():
         "transcription": "available" if avail["available"]
                          else f"unavailable: {', '.join(avail['missing'])}",
     }
+
+
+@app.get("/debug/mcp")
+async def debug_mcp():
+    """Diagnostic: check MCP server import and AIND API connectivity."""
+    import subprocess
+    import sys
+
+    result: dict[str, Any] = {}
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, 'aind-metadata-mcp/src'); "
+             "from aind_metadata_mcp.data_access_server import setup_mongodb_client; "
+             "c = setup_mongodb_client(); "
+             "print(c._count_records(filter_query={}))"],
+            capture_output=True, text=True, timeout=15,
+            cwd="/home/runner/workspace",
+        )
+        result["mcp_import"] = "ok" if proc.returncode == 0 else "failed"
+        result["stdout"] = proc.stdout.strip()
+        if proc.returncode != 0:
+            result["error_hint"] = proc.stderr.strip()[-200:] if proc.stderr else ""
+    except Exception as e:
+        result["mcp_import"] = f"error: {e}"
+
+    from .sdk_client_pool import get_pool
+    pool = get_pool()
+    result["pool_warm"] = pool.is_warm if pool else False
+    result["pool_connect_ms"] = pool._connect_ms if pool else None
+
+    opts = _get_options(None)
+    result["mcp_servers"] = list(opts.mcp_servers.keys()) if opts.mcp_servers else []
+    result["allowed_tools_count"] = len([t for t in (opts.allowed_tools or []) if "aind" in t])
+
+    return result

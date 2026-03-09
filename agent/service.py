@@ -54,15 +54,14 @@ AVAILABLE_MODELS = [
 def _build_options(model: str | None = None) -> ClaudeAgentOptions:
     """Build the ClaudeAgentOptions for the metadata agent."""
     # MCP tool names are prefixed with "mcp__<server-name>__".
-    # Trimmed from 20 → 13: dropped count_records, aggregation_retrieval,
-    # get_summary, flatten_records, and the two identify_nwb_contents_*
-    # (which pull in hdmf_zarr + boto3 — ~660ms of MCP startup). These
-    # are browse/NWB-inspection tools; the capture workflow never calls
-    # them. The get_*_example tools stay — system_prompt.py points the
-    # agent at them for schema reference. Saves ~1000 tokens of tool
-    # schemas per API turn.
+    # Trimmed from 20 → 16: dropped get_summary, flatten_records, and
+    # the two identify_nwb_contents_* (which pull in hdmf_zarr + boto3).
+    # count_records and aggregation_retrieval are kept because users need
+    # aggregate queries against the AIND MongoDB.
     aind_mcp_tools = [
         "mcp__aind-metadata-mcp__get_records",
+        "mcp__aind-metadata-mcp__count_records",
+        "mcp__aind-metadata-mcp__aggregation_retrieval",
         "mcp__aind-metadata-mcp__get_project_names",
         "mcp__aind-metadata-mcp__get_modality_types",
         "mcp__aind-metadata-mcp__get_subject_example",
@@ -75,6 +74,7 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
         "mcp__aind-metadata-mcp__get_quality_control_example",
         "mcp__aind-metadata-mcp__get_rig_example",
         "mcp__aind-metadata-mcp__get_top_level_nodes",
+        "mcp__aind-metadata-mcp__get_additional_schema_help",
     ]
 
     # Capture tools (capture_metadata, find_records, link_records, render_artifact)
