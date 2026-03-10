@@ -19,6 +19,17 @@ def main():
         host="localhost",
         port=8001,
         reload=is_dev,
+        reload_excludes=[
+            "frontend/*",
+            "*.log",
+            ".local/*",
+            "node_modules/*",
+            ".git/*",
+            "__pycache__/*",
+            "*.pyc",
+            "evals/*",
+            ".pythonlibs/*",
+        ] if is_dev else None,
     )
 
 

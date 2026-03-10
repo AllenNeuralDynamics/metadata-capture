@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  allowedDevOrigins: ['*'],
+  allowedDevOrigins: ['*.replit.dev', '*.repl.co', '*.replit.app', '*.kirk.replit.dev'],
   eslint: {
     ignoreDuringBuilds: true,
   },

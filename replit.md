@@ -74,8 +74,14 @@ workspace/
   - SSE `/chat` endpoint still exists on backend and via Next.js rewrite for non-Replit environments
   - `npm run dev` / `npm run start` use standard Next.js (SSE); `npm run dev:replit` / `npm run start:replit` use custom server (WebSocket)
   - Workflow and deployment commands use `dev:replit` / `start:replit` scripts
-  - Added `ws` package to frontend dependencies
   - Fixed NEXT_PUBLIC_API_URL default from 'http://localhost:8001' to '' (empty = use same-origin rewrites), preventing mixed-content HTTPS→HTTP failures in Replit iframe
+- 2026-03-10: Fixed "final message missing" bug for multi-turn tool-using queries
+  - Root cause: SDK doesn't stream `text_delta` events for intermediate tool-use turns; `AssistantMessage` objects contain only ThinkingBlock/ToolUseBlock (no TextBlock); final text is in `ResultMessage.result`
+  - Fix: `_translate_to_sse()` now extracts text from `ResultMessage.result` when `full_response` is empty (primary path), and appends unstreamed trailing text when `result` is longer than streamed content
+  - Also hardened reconciliation: only appends suffix when `result.startswith(streamed_text)` to avoid corrupted concatenation
+  - Reduced watchfiles reload noise: added `reload_excludes` for frontend/, .local/, node_modules/, etc. in `agent/run.py`
+  - Fixed Next.js `allowedDevOrigins` from `['*']` to explicit Replit host patterns
+  - Cleaned up diagnostic logging: removed noisy per-AssistantMessage warnings, removed PII from result logging
 - 2026-02-27: Added offline chat protection
   - Health check state lifted to page.tsx, passed as prop to Header and ChatPanel
   - Chat input disabled with "Agent is starting up..." overlay when agent offline

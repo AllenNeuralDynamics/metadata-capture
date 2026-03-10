@@ -438,14 +438,18 @@ async def _translate_to_sse(
                 yield {"block_stop": True}
 
         elif isinstance(message, AssistantMessage):
-            # Backfill text that didn't arrive via deltas (e.g.
-            # post-tool turns where streaming skipped a block).
-            msg_text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+            block_types = [type(b).__name__ for b in message.content]
+            msg_text = ""
+            for b in message.content:
+                if isinstance(b, TextBlock):
+                    msg_text += b.text
+                elif hasattr(b, 'text') and not isinstance(b, TextBlock):
+                    msg_text += b.text
             streamed_since = "".join(full_response[streamed_len_before_msg:])
             if msg_text and msg_text != streamed_since:
                 unstreamed = msg_text[len(streamed_since):] if msg_text.startswith(streamed_since) else msg_text
                 if unstreamed:
-                    logger.info("Yielding %d chars of unstreamed text", len(unstreamed))
+                    logger.info("Backfilling %d chars of unstreamed text from AssistantMessage", len(unstreamed))
                     full_response.append(unstreamed)
                     yield {"content": unstreamed}
             streamed_len_before_msg = len(full_response)
@@ -455,7 +459,22 @@ async def _translate_to_sse(
                 out_chars = sum(len(s) for s in full_response)
                 otps = (out_chars / 4) / (message.duration_ms / 1000) if message.duration_ms else 0
                 print(f"[profile] +{_t():.0f}ms: ResultMessage (turns={message.num_turns} sdk_duration={message.duration_ms}ms out={out_chars} chars ~{out_chars // 4} tok, OTPS~{otps:.1f} tok/s)", flush=True)
-            logger.info("Query complete: %d turns, %s ms", message.num_turns, message.duration_ms)
+            logger.info("Query complete: %d turns, %s ms, result_len=%s",
+                        message.num_turns, message.duration_ms,
+                        len(message.result) if message.result else 0)
+            if message.result and not full_response:
+                logger.info("Using ResultMessage.result as response (%d chars)", len(message.result))
+                full_response.append(message.result)
+                yield {"content": message.result}
+            elif message.result and full_response:
+                streamed_text = "".join(full_response)
+                if message.result != streamed_text and len(message.result) > len(streamed_text):
+                    if message.result.startswith(streamed_text):
+                        extra = message.result[len(streamed_text):]
+                        if extra.strip():
+                            logger.info("Appending %d unstreamed trailing chars from ResultMessage.result", len(extra))
+                            full_response.append(extra)
+                            yield {"content": extra}
 
 
 async def chat(
