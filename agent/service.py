@@ -133,7 +133,7 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
     opts = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         allowed_tools=["Read"] + capture_tools + aind_mcp_tools,
-        max_turns=5,
+        max_turns=15,
         model=model if model in AVAILABLE_MODELS else DEFAULT_MODEL,
         mcp_servers=mcp_servers,
         include_partial_messages=True,
@@ -459,10 +459,18 @@ async def _translate_to_sse(
                 out_chars = sum(len(s) for s in full_response)
                 otps = (out_chars / 4) / (message.duration_ms / 1000) if message.duration_ms else 0
                 print(f"[profile] +{_t():.0f}ms: ResultMessage (turns={message.num_turns} sdk_duration={message.duration_ms}ms out={out_chars} chars ~{out_chars // 4} tok, OTPS~{otps:.1f} tok/s)", flush=True)
-            logger.info("Query complete: %d turns, %s ms, result_len=%s",
-                        message.num_turns, message.duration_ms,
-                        len(message.result) if message.result else 0)
-            if message.result and not full_response:
+            logger.info("Query complete: turns=%d, duration=%sms, is_error=%s, subtype=%s, result_len=%s",
+                        message.num_turns, message.duration_ms, message.is_error,
+                        message.subtype, len(message.result) if message.result else 0)
+
+            if message.is_error:
+                error_detail = message.result or "The agent encountered an internal error."
+                logger.error("SDK reported is_error=True: result=%r", error_detail[:500])
+                if not full_response:
+                    full_response.append(error_detail)
+                    yield {"content": error_detail}
+
+            elif message.result and not full_response:
                 logger.info("Using ResultMessage.result as response (%d chars)", len(message.result))
                 full_response.append(message.result)
                 yield {"content": message.result}
@@ -475,6 +483,12 @@ async def _translate_to_sse(
                             logger.info("Appending %d unstreamed trailing chars from ResultMessage.result", len(extra))
                             full_response.append(extra)
                             yield {"content": extra}
+            elif not message.result and not full_response:
+                logger.warning("Query produced no text: turns=%d, duration=%sms, is_error=%s, subtype=%s",
+                               message.num_turns, message.duration_ms, message.is_error, message.subtype)
+                fallback = "I completed processing but wasn't able to generate a response. Please try rephrasing your question."
+                full_response.append(fallback)
+                yield {"content": fallback}
 
 
 async def chat(

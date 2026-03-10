@@ -76,9 +76,10 @@ workspace/
   - Workflow and deployment commands use `dev:replit` / `start:replit` scripts
   - Fixed NEXT_PUBLIC_API_URL default from 'http://localhost:8001' to '' (empty = use same-origin rewrites), preventing mixed-content HTTPS→HTTP failures in Replit iframe
 - 2026-03-10: Fixed "final message missing" bug for multi-turn tool-using queries
-  - Root cause: SDK doesn't stream `text_delta` events for intermediate tool-use turns; `AssistantMessage` objects contain only ThinkingBlock/ToolUseBlock (no TextBlock); final text is in `ResultMessage.result`
-  - Fix: `_translate_to_sse()` now extracts text from `ResultMessage.result` when `full_response` is empty (primary path), and appends unstreamed trailing text when `result` is longer than streamed content
-  - Also hardened reconciliation: only appends suffix when `result.startswith(streamed_text)` to avoid corrupted concatenation
+  - Root cause: `max_turns=5` was too low for complex tool-using queries (e.g. VR foraging needed 11 turns); SDK hit the limit and returned empty ResultMessage with no text. Increased to `max_turns=15`
+  - Secondary fix: `_translate_to_sse()` now extracts text from `ResultMessage.result` when `full_response` is empty, and appends unstreamed trailing text. Handles `is_error=True` ResultMessages by surfacing error details to the user
+  - Hardened reconciliation: only appends suffix when `result.startswith(streamed_text)`
+  - Added comprehensive ResultMessage logging: `is_error`, `subtype`, `result_len`
   - Reduced watchfiles reload noise: added `reload_excludes` for frontend/, .local/, node_modules/, etc. in `agent/run.py`
   - Fixed Next.js `allowedDevOrigins` from `['*']` to explicit Replit host patterns
   - Cleaned up diagnostic logging: removed noisy per-AssistantMessage warnings, removed PII from result logging
