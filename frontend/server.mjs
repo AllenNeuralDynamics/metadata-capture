@@ -1,6 +1,6 @@
 import { createServer } from 'http';
 import next from 'next';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
@@ -20,78 +20,93 @@ app.prepare().then(() => {
     const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
     if (pathname === '/ws/chat') {
       wss.handleUpgrade(req, socket, head, (clientWs) => {
-        const backendWs = new WebSocket('ws://localhost:8001/ws/chat');
-        let pendingSends = 0;
+        let abortController = null;
 
         const pingInterval = setInterval(() => {
-          if (clientWs.readyState === WebSocket.OPEN) {
+          if (clientWs.readyState === 1) {
             clientWs.ping();
           }
         }, 20000);
 
-        const closeClient = () => {
-          const doClose = () => {
+        clientWs.on('message', async (data) => {
+          const payload = data.toString();
+          abortController = new AbortController();
+
+          try {
+            const res = await fetch('http://localhost:8001/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: payload,
+              signal: abortController.signal,
+            });
+
+            if (!res.ok) {
+              if (clientWs.readyState === 1) {
+                clientWs.send(JSON.stringify({ error: `Backend error: ${res.status}` }));
+                clientWs.close();
+              }
+              clearInterval(pingInterval);
+              return;
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            const processLine = (line) => {
+              if (line.startsWith('data: ')) {
+                const eventData = line.slice(6);
+                if (eventData === '[DONE]') {
+                  if (clientWs.readyState === 1) {
+                    clientWs.send(JSON.stringify({ done: true }));
+                  }
+                } else if (eventData.trim()) {
+                  if (clientWs.readyState === 1) {
+                    clientWs.send(eventData);
+                  }
+                }
+              }
+            };
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                processLine(line);
+              }
+            }
+
+            if (buffer.trim()) {
+              processLine(buffer);
+            }
+          } catch (err) {
+            if (err.name !== 'AbortError') {
+              console.error('SSE-to-WS bridge error:', err.message);
+              if (clientWs.readyState === 1) {
+                clientWs.send(JSON.stringify({ error: err.message }));
+              }
+            }
+          } finally {
             clearInterval(pingInterval);
-            if (clientWs.readyState === WebSocket.OPEN) {
+            if (clientWs.readyState === 1) {
               clientWs.close();
             }
-          };
-          if (pendingSends > 0) {
-            const check = setInterval(() => {
-              if (pendingSends <= 0) {
-                clearInterval(check);
-                setTimeout(doClose, 50);
-              }
-            }, 10);
-            setTimeout(() => { clearInterval(check); doClose(); }, 2000);
-          } else {
-            setTimeout(doClose, 50);
-          }
-        };
-
-        backendWs.on('open', () => {
-          clientWs.on('message', (data) => {
-            if (backendWs.readyState === WebSocket.OPEN) {
-              backendWs.send(data.toString());
-            }
-          });
-
-          backendWs.on('message', (data) => {
-            if (clientWs.readyState === WebSocket.OPEN) {
-              pendingSends++;
-              clientWs.send(data.toString(), (err) => {
-                pendingSends--;
-                if (err) {
-                  console.error('Failed to forward WS message to client:', err.message);
-                }
-              });
-            }
-          });
-        });
-
-        backendWs.on('close', () => {
-          closeClient();
-        });
-
-        backendWs.on('error', () => {
-          clearInterval(pingInterval);
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.close();
           }
         });
 
         clientWs.on('close', () => {
           clearInterval(pingInterval);
-          if (backendWs.readyState === WebSocket.OPEN || backendWs.readyState === WebSocket.CONNECTING) {
-            backendWs.terminate();
-          }
+          if (abortController) abortController.abort();
         });
 
         clientWs.on('error', () => {
           clearInterval(pingInterval);
-          if (backendWs.readyState === WebSocket.OPEN || backendWs.readyState === WebSocket.CONNECTING) {
-            backendWs.terminate();
-          }
+          if (abortController) abortController.abort();
         });
       });
     }
