@@ -17,7 +17,7 @@ from typing import Any
 os.environ.setdefault("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -196,47 +196,6 @@ async def chat_endpoint(req: ChatRequest):
         },
     )
 
-
-@app.websocket("/ws/chat")
-async def chat_ws(ws: WebSocket):
-    """WebSocket chat endpoint — delivers events without proxy buffering."""
-    await ws.accept()
-    ping_task = None
-    try:
-        async def _keepalive():
-            while True:
-                await asyncio.sleep(15)
-                try:
-                    await ws.send_text(json.dumps({"ping": True}))
-                except Exception:
-                    break
-
-        raw = await ws.receive_text()
-        req_data = json.loads(raw)
-        message = req_data.get("message", "")
-        session_id = req_data.get("session_id") or str(uuid.uuid4())
-        model = req_data.get("model")
-        attachments = req_data.get("attachments")
-
-        ping_task = asyncio.create_task(_keepalive())
-
-        async for chunk in chat(session_id, message, model=model, attachments=attachments):
-            await ws.send_text(json.dumps(chunk))
-        await asyncio.sleep(0.5)
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        try:
-            await ws.send_text(json.dumps({"error": str(exc)}))
-        except Exception:
-            pass
-    finally:
-        if ping_task:
-            ping_task.cancel()
-        try:
-            await ws.close()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
