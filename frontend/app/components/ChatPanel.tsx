@@ -92,6 +92,33 @@ function isVideo(file: File): boolean {
   return VIDEO_EXTS.has(ext);
 }
 
+/**
+ * Block until the backend's extraction task flips from 'pending'. The
+ * upload endpoint returns 200 as soon as bytes are on disk; extraction
+ * runs as asyncio.create_task afterwards. Without this wait, the chat
+ * POST fires while status is still 'pending' and the agent sees "still
+ * processing" instead of the content. Timeout is a safety net — on
+ * expiry we proceed with the send anyway (agent will surface the
+ * pending state, better than an indefinitely stuck send button).
+ */
+async function waitForExtraction(
+  fileId: string, timeoutMs = 90_000,
+): Promise<'done' | 'error' | 'timeout'> {
+  const deadline = Date.now() + timeoutMs;
+  let interval = 500;
+  while (Date.now() < deadline) {
+    try {
+      const r = await getUploadExtraction(fileId);
+      if (r.status !== 'pending') return r.status;
+    } catch {
+      return 'error';
+    }
+    await new Promise((res) => setTimeout(res, interval));
+    interval = Math.min(interval * 1.3, 2000);  // back off to 2s
+  }
+  return 'timeout';
+}
+
 // Compact icon for non-image attachment chips (preview strip + sent messages)
 function fileTypeIcon(contentType: string, filename: string): string {
   const ext = filename.toLowerCase().split('.').pop() || '';
@@ -532,9 +559,11 @@ export default function ChatPanel({ sessionId, newChatNonce, onSessionChange, ag
   const [openArtifact, setOpenArtifact] = useState<ArtifactSource | null>(null);
   // Background extraction status per uploaded file (non-image/pdf only)
   const [extractionStatus, setExtractionStatus] = useState<Record<string, 'pending' | 'done' | 'error'>>({});
-  // Per-pending-file upload fraction (0..1) — populated during handleSend's
-  // throttledUpload call, cleared when the chat request goes out.
-  const [uploadProgress, setUploadProgress] = useState<Record<number, number>>({});
+  // Per-pending-file progress: a number (0..1) during XHR upload, then
+  // 'extracting' while awaiting the backend's keyframe/parse task. Cleared
+  // when the chat request goes out. Indexed by pendingFiles position.
+  type ChipProgress = number | 'extracting';
+  const [uploadProgress, setUploadProgress] = useState<Record<number, ChipProgress>>({});
   // Dev-only: expose modal opener for e2e tests (no URL route to the modal)
   useEffect(() => {
     if (process.env.NODE_ENV === 'development') {
@@ -878,12 +907,35 @@ export default function ChatPanel({ sessionId, newChatNonce, onSessionChange, ag
           filename: u.filename,
           content_type: u.content_type,
         }));
-        // Kick off extraction polling for non-image/pdf files — fire-and-forget, doesn't block SSE
-        uploaded.forEach((u) => {
-          if (u.content_type.startsWith('image/') || u.content_type === 'application/pdf') return;
-          setExtractionStatus((prev) => ({ ...prev, [u.id]: 'pending' }));
-          setTimeout(() => pollExtraction(u.id), 1000);
-        });
+        // Block on extraction for non-native types. The upload POST returns
+        // as soon as bytes hit disk; extraction runs as an asyncio task
+        // afterwards. Firing the chat before it finishes means the agent
+        // reads status='pending' and sees "still processing" instead of
+        // the keyframes. Chip stays visible with an extracting overlay.
+        const needsExtraction = uploaded
+          .map((u, idx) => ({ u, idx }))
+          .filter(({ u }) => !u.content_type.startsWith('image/') && u.content_type !== 'application/pdf');
+        if (needsExtraction.length > 0) {
+          setUploadProgress((prev) => {
+            const next = { ...prev };
+            for (const { idx } of needsExtraction) next[idx] = 'extracting';
+            return next;
+          });
+          const results = await Promise.all(needsExtraction.map(({ u }) =>
+            waitForExtraction(u.id)
+          ));
+          // Seed post-send card status. On timeout, fall back to the old
+          // fire-and-forget poll so the card eventually flips.
+          needsExtraction.forEach(({ u }, k) => {
+            const r = results[k];
+            if (r === 'timeout') {
+              setExtractionStatus((prev) => ({ ...prev, [u.id]: 'pending' }));
+              setTimeout(() => pollExtraction(u.id), 1000);
+            } else {
+              setExtractionStatus((prev) => ({ ...prev, [u.id]: r }));
+            }
+          });
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Upload failed');
         setUploadProgress({});
@@ -1238,8 +1290,10 @@ export default function ChatPanel({ sessionId, newChatNonce, onSessionChange, ag
                         </div>
                       )}
                       {/* Upload progress overlay — wash fills bottom-up as
-                          XHR progress ticks arrive. Hidden until send. */}
-                      {prog !== undefined && (
+                          XHR progress ticks arrive. Flips to a pulse +
+                          "extracting" label once bytes are on disk and
+                          we're waiting on the backend's keyframe task. */}
+                      {typeof prog === 'number' && (
                         <div className="absolute inset-0 rounded-lg overflow-hidden pointer-events-none">
                           <div className="absolute inset-x-0 bottom-0 bg-brand-fig/30 transition-[height] duration-150"
                                style={{ height: `${Math.round(prog * 100)}%` }} />
@@ -1248,6 +1302,12 @@ export default function ChatPanel({ sessionId, newChatNonce, onSessionChange, ag
                               {Math.round(prog * 100)}%
                             </span>
                           </div>
+                        </div>
+                      )}
+                      {prog === 'extracting' && (
+                        <div className="absolute inset-0 rounded-lg bg-white/75 flex flex-col items-center justify-center pointer-events-none">
+                          <span className="w-4 h-4 border-2 border-brand-fig border-t-transparent rounded-full animate-spin" />
+                          <span className="text-[9px] font-medium text-brand-fig mt-1">extracting</span>
                         </div>
                       )}
                       <button

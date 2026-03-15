@@ -60,12 +60,15 @@ def test_find_binary_nonexistent():
 
 
 def test_check_availability_reports_missing():
-    """On this dev box neither ffmpeg nor whisper-cli is installed."""
-    avail = check_availability()
+    """Nothing found → all three in missing. Mocked — the real box may
+    or may not have ffmpeg installed."""
+    with patch("agent.tools.transcribe.find_binary", return_value=None), \
+         patch("agent.tools.transcribe._model_path", return_value=None):
+        avail = check_availability()
     assert avail["available"] is False
     assert "ffmpeg" in avail["missing"]
-    # whisper-cli and model file are also expected missing here, but the
-    # hard assertion is on ffmpeg — that's the one verified in env setup.
+    assert "whisper-cli" in avail["missing"]
+    assert any("model file" in m for m in avail["missing"])
 
 
 # ---------------------------------------------------------------------------

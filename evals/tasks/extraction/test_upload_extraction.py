@@ -193,10 +193,11 @@ def test_health_reports_transcription_status(client):
     assert t == "available" or t.startswith("unavailable:"), (
         f"unexpected transcription value: {t!r}"
     )
-    # On this box ffmpeg is missing — verify the missing-binaries string
-    # is actually populated, not just the prefix.
+    # If unavailable, the suffix must name at least one missing piece
+    # (ffmpeg, whisper-cli, or the model file). Which specific ones are
+    # missing is environment-dependent.
     if t.startswith("unavailable:"):
-        assert "ffmpeg" in t
+        assert len(t) > len("unavailable: "), "missing-list should be non-empty"
 
 
 # ---------------------------------------------------------------------------
