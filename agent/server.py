@@ -75,11 +75,11 @@ async def lifespan(app: FastAPI):
         pool = init_pool(_get_options)
         print("[lifespan] Warming SDK client pool...", flush=True)
         try:
-            await asyncio.wait_for(pool.warmup(), timeout=30)
+            await asyncio.wait_for(pool.warmup(), timeout=60)
             print("[lifespan] SDK client pool warm", flush=True)
         except asyncio.TimeoutError:
             logger.warning(
-                "SDK client pool warmup timed out after 30s — chat() will fall back to "
+                "SDK client pool warmup timed out after 60s — chat() will fall back to "
                 "per-request query() (~4s slower)."
             )
             print("[lifespan] SDK client pool warmup timed out", flush=True)

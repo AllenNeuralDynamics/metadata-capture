@@ -87,6 +87,12 @@ workspace/
   - Health check state lifted to page.tsx, passed as prop to Header and ChatPanel
   - Chat input disabled with "Agent is starting up..." overlay when agent offline
   - Deployment set to autoscale (cold start ~60s)
+- 2026-03-17: Production MCP fixes
+  - Build command now installs Python deps (`pip install -r agent/requirements.txt && pip install -e ./aind-metadata-mcp`) before frontend build — ensures aind-metadata-mcp is available in production container
+  - SDK pool warmup timeout increased from 30s → 60s (MCP startup takes ~33s in production due to MongoDB connection latency)
+  - 529 Overloaded errors now show user-friendly message instead of raw SDK error string
+  - Fallback model list in `api.ts` updated to match backend (claude-sonnet-4-6)
+  - Restored `NEXT_PUBLIC_API_URL` default to `http://localhost:8001` for local dev SSE streaming (Replit overrides to `""` via `[userenv.shared]`)
 - 2026-02-24: Configured for Replit environment
   - Set Next.js to port 5000 with all hosts allowed
   - Set backend to localhost:8001
