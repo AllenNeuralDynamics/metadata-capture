@@ -467,8 +467,12 @@ async def _translate_to_sse(
                 error_detail = message.result or "The agent encountered an internal error."
                 logger.error("SDK reported is_error=True: result=%r", error_detail[:500])
                 if not full_response:
-                    full_response.append(error_detail)
-                    yield {"content": error_detail}
+                    if "529" in error_detail or "verload" in error_detail:
+                        user_msg = "Claude's API is currently overloaded. Please wait a moment and try again."
+                    else:
+                        user_msg = error_detail
+                    full_response.append(user_msg)
+                    yield {"content": user_msg}
 
             elif message.result and not full_response:
                 logger.info("Using ResultMessage.result as response (%d chars)", len(message.result))
