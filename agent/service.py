@@ -132,7 +132,7 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
     # uploaded files on disk if base64 isn't enough (rare edge case).
     opts = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        allowed_tools=["Read"] + capture_tools + aind_mcp_tools,
+        allowed_tools=["Read", "WebSearch"] + capture_tools + aind_mcp_tools,
         max_turns=15,
         model=model if model in AVAILABLE_MODELS else DEFAULT_MODEL,
         mcp_servers=mcp_servers,
