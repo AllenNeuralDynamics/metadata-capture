@@ -28,6 +28,34 @@ def _sqlite_to_pg(sql: str) -> str:
     return re.sub(r"\?", _replacer, sql)
 
 
+_TABLE_NAME_RE = re.compile(
+    r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.IGNORECASE
+)
+_COLUMN_RE = re.compile(r"^\s+(\w+)\s+", re.MULTILINE)
+_SKIP_KEYWORDS = frozenset({
+    "CHECK", "CONSTRAINT", "UNIQUE", "PRIMARY", "FOREIGN", "REFERENCES",
+})
+
+
+def _parse_ddl(ddl: str) -> tuple[str, set[str]]:
+    """Extract table name and column names from a CREATE TABLE DDL."""
+    m = _TABLE_NAME_RE.search(ddl)
+    if not m:
+        raise ValueError(f"Cannot parse table name from DDL: {ddl[:80]}")
+    table = m.group(1)
+
+    body_start = ddl.index("(", m.end()) + 1
+    body_end = ddl.rindex(")")
+    body = ddl[body_start:body_end]
+
+    columns: set[str] = set()
+    for line_match in _COLUMN_RE.finditer(body):
+        word = line_match.group(1).upper()
+        if word not in _SKIP_KEYWORDS:
+            columns.add(line_match.group(1).lower())
+    return table, columns
+
+
 class Database(ABC):
     """Unified async database interface."""
 
@@ -88,17 +116,27 @@ class PostgresDatabase(Database):
             logger.info("PostgreSQL connection pool closed")
 
     async def init_tables(self) -> None:
-        from .models import PG_TABLES, CREATE_INDEXES, UPLOADS_EXTRACTION_COLUMNS
+        from .models import PG_TABLES, CREATE_INDEXES
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             for ddl in PG_TABLES:
                 await conn.execute(ddl)
+                table, expected_cols = _parse_ddl(ddl)
+                rows = await conn.fetch(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = $1", table
+                )
+                actual_cols = {r["column_name"] for r in rows}
+                missing = expected_cols - actual_cols
+                if missing:
+                    logger.warning(
+                        "Schema drift in %s: missing columns %s — dropping and rebuilding",
+                        table, missing,
+                    )
+                    await conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+                    await conn.execute(ddl)
             for idx in CREATE_INDEXES:
                 await conn.execute(idx)
-            for col_name, col_type in UPLOADS_EXTRACTION_COLUMNS:
-                await conn.execute(
-                    f"ALTER TABLE uploads ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
-                )
 
 
 class SQLiteDatabase(Database):
@@ -144,30 +182,23 @@ class SQLiteDatabase(Database):
             logger.info("SQLite connection closed")
 
     async def init_tables(self) -> None:
-        from .models import SQLITE_TABLES, CREATE_INDEXES, UPLOADS_EXTRACTION_COLUMNS
-        import aiosqlite
+        from .models import SQLITE_TABLES, CREATE_INDEXES
         conn = await self._get_conn()
         for ddl in SQLITE_TABLES:
             await conn.executescript(ddl)
+            table, expected_cols = _parse_ddl(ddl)
+            cursor = await conn.execute(f"PRAGMA table_info({table})")
+            actual_cols = {row[1] for row in await cursor.fetchall()}
+            missing = expected_cols - actual_cols
+            if missing:
+                logger.warning(
+                    "Schema drift in %s: missing columns %s — dropping and rebuilding",
+                    table, missing,
+                )
+                await conn.execute(f"DROP TABLE IF EXISTS {table}")
+                await conn.executescript(ddl)
         for idx in CREATE_INDEXES:
             await conn.execute(idx)
-        # Migrate: add attachments_json to conversations if missing
-        cols_cursor = await conn.execute("PRAGMA table_info(conversations)")
-        cols = {row[1] for row in await cols_cursor.fetchall()}
-        if "attachments_json" not in cols:
-            await conn.execute("ALTER TABLE conversations ADD COLUMN attachments_json TEXT")
-        # Migrate: add extraction columns to uploads if missing. Tolerate the
-        # duplicate-column race when multiple workers call init_db concurrently
-        # (check-then-alter is not atomic across processes with SQLite).
-        cursor = await conn.execute("PRAGMA table_info(uploads)")
-        upload_cols = {row[1] for row in await cursor.fetchall()}
-        for col_name, col_def in UPLOADS_EXTRACTION_COLUMNS:
-            if col_name not in upload_cols:
-                try:
-                    await conn.execute(f"ALTER TABLE uploads ADD COLUMN {col_name} {col_def}")
-                except aiosqlite.OperationalError as exc:
-                    if "duplicate column" not in str(exc).lower():
-                        raise
         await conn.commit()
 
 
