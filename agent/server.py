@@ -30,7 +30,8 @@ from .tools.spreadsheet import SPREADSHEET_CONTENT_TYPES, parse_spreadsheet
 
 logger = logging.getLogger(__name__)
 
-UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
+_is_deployment = os.environ.get("REPLIT_DEPLOYMENT") == "1"
+UPLOADS_DIR = Path("/tmp/uploads") if _is_deployment else Path(__file__).resolve().parent.parent / "uploads"
 
 # Extensions corresponding to NATIVE_TYPES — used as the extension fallback
 # for native files that arrive with a generic content-type like
@@ -509,8 +510,12 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
     file_id = str(uuid.uuid4())
     dest_ext = ext or ".bin"
     dest = UPLOADS_DIR / f"{file_id}{dest_ext}"
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(contents)
+    try:
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(contents)
+    except OSError as e:
+        logger.exception("Failed to write upload to %s", dest)
+        raise HTTPException(status_code=500, detail=f"File storage error: {e}")
 
     # Native types (images, PDFs) go directly to Claude at chat time — no
     # extraction pipeline. Mark them 'done' at insert so the frontend's
