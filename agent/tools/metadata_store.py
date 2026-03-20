@@ -117,8 +117,10 @@ async def update_record(
     record_id: str,
     data: dict[str, Any] | None = None,
     name: str | None = None,
+    merge: bool = True,
 ) -> dict[str, Any] | None:
-    """Update a record's data and/or name. Merges data with existing."""
+    """Update a record's data and/or name. Merges data with existing by default;
+    pass merge=False for a full replace (PUT semantics)."""
     db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
 
@@ -126,11 +128,10 @@ async def update_record(
     if existing is None:
         return None
 
-    merged_data = existing.get("data_json") or {}
-
     if data is not None:
-        if isinstance(merged_data, dict) and isinstance(data, dict):
-            merged_data = {**merged_data, **data}
+        if merge:
+            existing_data = existing.get("data_json") or {}
+            merged_data = {**existing_data, **data} if isinstance(existing_data, dict) and isinstance(data, dict) else data
         else:
             merged_data = data
         await db.execute(

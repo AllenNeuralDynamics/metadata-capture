@@ -280,7 +280,7 @@ async def _apply_record_update(
     from .tools.metadata_store import get_record, update_record, update_record_validation
     from .validation import validate_record
 
-    result = await update_record(record_id, data=data_patch)
+    result = await update_record(record_id, data=data_patch, merge=False)
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to update record")
 
