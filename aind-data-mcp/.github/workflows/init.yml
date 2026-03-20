@@ -19,6 +19,7 @@ jobs:
       uses: actions/checkout@v4
     - name: Rename package
       run: |
+        current_date=$(date '+%Y-%m-%d')
         pkg_name=$(echo "${REPO_NAME}" | tr - _)
         current_description='description = "Prints messages to stdout. Simple boilerplate for libraries."'
         new_description='description = "Generated from aind-library-template"'
@@ -31,6 +32,9 @@ jobs:
         echo '__version__ = "0.0.0"' >> src/${pkg_name}/__init__.py
         sed -i "s/aind_library_template/${pkg_name}/" pyproject.toml
         sed -i "s/aind-library-template/${REPO_NAME}/" pyproject.toml
+        sed -i "s/aind-library-template/${REPO_NAME}/" CITATION.cff
+        sed -i "s/^version:.*/version: \"v0.0.0\"/" CITATION.cff
+        sed -i "s/^date-released:.*/date-release: $current_date/" CITATION.cff
         sed -i "s/aind_library_template/${pkg_name}/" docs/source/conf.py
         sed -i "s/${current_description}/${new_description}/" pyproject.toml
         sed -i "/pandas/d" pyproject.toml
@@ -41,7 +45,7 @@ jobs:
       with:
         default_author: github_actions
         message: "ci: version bump [skip actions]"
-        add: '["pyproject.toml", "README.md", "src/*", "docs/source/conf.py"]'
+        add: '["pyproject.toml", "README.md", "CITATION.cff", "src/*", "docs/source/conf.py"]'
         remove: '["-r src/aind_library_template", "tests/test_message_handler.py"]'
     - name: Add first tag
       run: |
