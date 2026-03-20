@@ -337,11 +337,11 @@ export async function fetchRecord(recordId: string): Promise<MetadataRecord> {
   return res.json();
 }
 
-export async function updateRecordData(recordId: string, data: Record<string, unknown>): Promise<MetadataRecord> {
+export async function updateRecordData(recordId: string, data: Record<string, unknown>, merge = true): Promise<MetadataRecord> {
   const res = await fetch(`${API_BASE}/records/${recordId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data }),
+    body: JSON.stringify({ data, merge }),
   });
   if (!res.ok) throw new Error(`Failed to update record: ${res.status}`);
   return res.json();
