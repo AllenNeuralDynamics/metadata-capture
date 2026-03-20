@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _PROFILE = os.environ.get("CHAT_PROFILE") == "1"
 
 # Path to the AIND MCP server for schema context
-MCP_SERVER_DIR = Path(__file__).resolve().parent.parent / "aind-metadata-mcp"
+MCP_SERVER_DIR = Path(__file__).resolve().parent.parent / "aind-data-mcp"
 
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -60,22 +60,20 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
     # count_records and aggregation_retrieval are kept because users need
     # aggregate queries against the AIND MongoDB.
     aind_mcp_tools = [
-        "mcp__aind-metadata-mcp__get_records",
-        "mcp__aind-metadata-mcp__count_records",
-        "mcp__aind-metadata-mcp__aggregation_retrieval",
-        "mcp__aind-metadata-mcp__get_project_names",
-        "mcp__aind-metadata-mcp__get_modality_types",
-        "mcp__aind-metadata-mcp__get_subject_example",
-        "mcp__aind-metadata-mcp__get_procedures_example",
-        "mcp__aind-metadata-mcp__get_data_description_example",
-        "mcp__aind-metadata-mcp__get_session_example",
-        "mcp__aind-metadata-mcp__get_instrument_example",
-        "mcp__aind-metadata-mcp__get_acquisition_example",
-        "mcp__aind-metadata-mcp__get_processing_example",
-        "mcp__aind-metadata-mcp__get_quality_control_example",
-        "mcp__aind-metadata-mcp__get_rig_example",
-        "mcp__aind-metadata-mcp__get_top_level_nodes",
-        "mcp__aind-metadata-mcp__get_additional_schema_help",
+        "mcp__aind-data-mcp__get_records",
+        "mcp__aind-data-mcp__count_records",
+        "mcp__aind-data-mcp__aggregation_retrieval",
+        "mcp__aind-data-mcp__get_project_names",
+        "mcp__aind-data-mcp__get_modality_types",
+        "mcp__aind-data-mcp__get_subject_example",
+        "mcp__aind-data-mcp__get_procedures_example",
+        "mcp__aind-data-mcp__get_data_description_example",
+        "mcp__aind-data-mcp__get_instrument_example",
+        "mcp__aind-data-mcp__get_acquisition_example",
+        "mcp__aind-data-mcp__get_processing_example",
+        "mcp__aind-data-mcp__get_quality_control_example",
+        "mcp__aind-data-mcp__get_top_level_nodes",
+        "mcp__aind-data-mcp__get_additional_schema_help",
     ]
 
     # Capture tools (capture_metadata, find_records, link_records, render_artifact)
@@ -119,10 +117,10 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
         mcp_env = {**os.environ, "PYTHONPATH": new_pypath}
         print(f"[MCP] Registering AIND MCP server via {mcp_python} (src={mcp_src})", flush=True)
         logger.info("Registering AIND MCP server via %s (src=%s)", mcp_python, mcp_src)
-        mcp_servers["aind-metadata-mcp"] = {
+        mcp_servers["aind-data-mcp"] = {
             "type": "stdio",
             "command": mcp_python,
-            "args": ["-m", "aind_metadata_mcp.data_access_server"],
+            "args": ["-m", "aind_data_mcp.data_access_server"],
             "env": mcp_env,
         }
 

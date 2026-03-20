@@ -154,7 +154,7 @@ def test_put_record_updates_data(client):
     resp = _run(client.put(f"/records/{record_id}", json={"data": {"session_end_time": "5:00 PM"}}))
     assert resp.status_code == 200
     updated = resp.json()
-    assert updated["data_json"]["session_start_time"] == "9:00 AM"  # merged
+    assert updated["data_json"]["session_start_time"] == "9:00 AM"  # preserved via merge
     assert updated["data_json"]["session_end_time"] == "5:00 PM"
 
 

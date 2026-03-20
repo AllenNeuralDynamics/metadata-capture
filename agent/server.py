@@ -146,6 +146,7 @@ class LinkRequest(BaseModel):
 
 class UpdateRecordDataRequest(BaseModel):
     data: dict[str, Any]
+    merge: bool = True
 
 
 class PatchFieldRequest(BaseModel):
@@ -274,13 +275,13 @@ async def get_record_endpoint(record_id: str) -> dict[str, Any]:
 
 
 async def _apply_record_update(
-    record_id: str, record_type: str, data_patch: dict[str, Any]
+    record_id: str, record_type: str, data_patch: dict[str, Any], merge: bool = True
 ) -> dict[str, Any]:
     """Shared tail for PUT and PATCH: merge → validate → refetch."""
     from .tools.metadata_store import get_record, update_record, update_record_validation
     from .validation import validate_record
 
-    result = await update_record(record_id, data=data_patch)
+    result = await update_record(record_id, data=data_patch, merge=merge)
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to update record")
 
@@ -302,7 +303,7 @@ async def update_record_endpoint(record_id: str, req: UpdateRecordDataRequest) -
     if existing is None:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    return await _apply_record_update(record_id, existing["record_type"], req.data)
+    return await _apply_record_update(record_id, existing["record_type"], req.data, merge=req.merge)
 
 
 def _build_field_patch(field: str, value: str) -> dict[str, Any]:

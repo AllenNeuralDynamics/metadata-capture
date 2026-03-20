@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools", "setuptools-scm"]
+requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aind-metadata-mcp"
-description = "MCP server for AIND metadata"
+name = "aind-data-mcp"
+description = "Generated from aind-library-template"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
@@ -25,7 +25,10 @@ dependencies = [
     "suffix-trees>=0.3.0",
 ]
 
-[project.optional-dependencies]
+[project.scripts]
+aind-data-mcp = "aind_data_mcp.data_access_server:main"
+
+[dependency-groups]
 dev = [
     'black',
     'coverage',
@@ -36,18 +39,15 @@ dev = [
     'furo'
 ]
 
-[project.scripts]
-aind-metadata-mcp = "aind_metadata_mcp.data_access_server:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "aind_metadata_mcp.__version__"}
+version = {attr = "aind_data_mcp.__version__"}
 
 [tool.black]
 line-length = 79
-target_version = ['py310']
+target_version = ['py311']
 exclude = '''
 
 (
@@ -61,6 +61,7 @@ exclude = '''
     | _build
     | build
     | dist
+    | .conda
   )/
   | .gitignore
 )
@@ -68,7 +69,7 @@ exclude = '''
 
 [tool.coverage.run]
 omit = ["*__init__*"]
-source = ["aind_metadata_mcp", "tests"]
+source = ["aind_data_mcp", "tests"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -82,7 +83,8 @@ fail_under = 100
 [tool.isort]
 line_length = 79
 profile = "black"
+skip = [".conda"]
 
 [tool.interrogate]
-exclude = ["setup.py", "docs", "build"]
+exclude = ["setup.py", "docs", "build", ".conda"]
 fail-under = 100
