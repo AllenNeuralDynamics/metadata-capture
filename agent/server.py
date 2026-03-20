@@ -19,7 +19,7 @@ os.environ.setdefault("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from .db.database import close_db, init_db
@@ -30,7 +30,8 @@ from .tools.spreadsheet import SPREADSHEET_CONTENT_TYPES, parse_spreadsheet
 
 logger = logging.getLogger(__name__)
 
-UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
+_is_deployment = os.environ.get("REPLIT_DEPLOYMENT") == "1"
+UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(Path(__file__).resolve().parent.parent / "uploads")))
 
 # Extensions corresponding to NATIVE_TYPES — used as the extension fallback
 # for native files that arrive with a generic content-type like
@@ -71,12 +72,25 @@ async def lifespan(app: FastAPI):
     (no API key, missing MCP deps, etc.), we log and continue — chat()
     falls back to one-shot query() which has the same failure surface.
     """
-    await init_db()
+    print("[lifespan] Initializing database...", flush=True)
+    try:
+        await init_db()
+        print("[lifespan] Database initialized OK", flush=True)
+    except Exception:
+        logger.exception("Database initialization failed — continuing without DB")
 
-    if os.environ.get("USE_SDK_POOL", "1") == "1":
+    if os.environ.get("USE_SDK_POOL", "0") == "1":
         pool = init_pool(_get_options)
+        print("[lifespan] Warming SDK client pool...", flush=True)
         try:
-            await pool.warmup()
+            await asyncio.wait_for(pool.warmup(), timeout=60)
+            print("[lifespan] SDK client pool warm", flush=True)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "SDK client pool warmup timed out after 60s — chat() will fall back to "
+                "per-request query() (~4s slower)."
+            )
+            print("[lifespan] SDK client pool warmup timed out", flush=True)
         except Exception:
             logger.exception(
                 "SDK client pool warmup failed — chat() will fall back to "
@@ -152,13 +166,18 @@ async def chat_endpoint(req: ChatRequest):
 
     async def event_stream():
         queue: asyncio.Queue[str | None] = asyncio.Queue()
+        evt_count = 0
 
         async def _produce():
+            nonlocal evt_count
             try:
                 async for chunk in chat(session_id, req.message, model=req.model, attachments=attachments):
+                    evt_count += 1
                     await queue.put(f"data: {json.dumps(chunk)}\n\n")
+                logger.info("SSE producer: chat() finished, %d events yielded, sending [DONE]", evt_count)
                 await queue.put("data: [DONE]\n\n")
             except Exception as exc:
+                logger.exception("SSE producer error after %d events: %s", evt_count, exc)
                 await queue.put(f"data: {json.dumps({'error': str(exc)})}\n\n")
             finally:
                 await queue.put(None)
@@ -174,12 +193,16 @@ async def chat_endpoint(req: ChatRequest):
                 if item is None:
                     break
                 yield item
+        except GeneratorExit:
+            logger.warning("SSE consumer: GeneratorExit after %d events (client disconnected mid-stream)", evt_count)
+            raise
         finally:
             producer.cancel()
             try:
                 await producer
             except (asyncio.CancelledError, Exception):
                 pass
+            logger.info("SSE consumer: stream ended, %d events total", evt_count)
 
     return StreamingResponse(
         event_stream(),
@@ -189,6 +212,7 @@ async def chat_endpoint(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -524,10 +548,10 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
     file_id = str(uuid.uuid4())
     dest_ext = ext or ".bin"
     dest = UPLOADS_DIR / f"{file_id}{dest_ext}"
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
     size_bytes = 0
     try:
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         with dest.open("wb") as out:
             while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
                 size_bytes += len(chunk)
@@ -540,9 +564,24 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
     except HTTPException:
         dest.unlink(missing_ok=True)
         raise
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        logger.exception("Failed to write upload to %s", dest)
+        raise HTTPException(status_code=500, detail=f"File storage error: {exc}")
     except Exception as exc:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Upload write failed: {exc}")
+
+    # DB-stored copy for ephemeral-filesystem environments (Replit autoscale).
+    # Skipped for files above the non-video cap — a multi-GB video won't fit
+    # in a BLOB column; its durability comes from the extraction columns
+    # (keyframes + transcript) that _extract_and_store fills in.
+    file_data: bytes | None = None
+    if size_bytes <= MAX_UPLOAD_SIZE:
+        try:
+            file_data = dest.read_bytes()
+        except OSError:
+            logger.warning("Could not re-read upload for DB durability: %s", dest)
 
     # Native types (images, PDFs) go directly to Claude at chat time — no
     # extraction pipeline. Mark them 'done' at insert so the frontend's
@@ -555,6 +594,7 @@ async def upload_file(file: UploadFile, session_id: str | None = None):
         content_type=content_type,
         file_path=str(dest),
         size_bytes=size_bytes,
+        file_data=file_data,
         session_id=session_id,
         initial_status="done" if is_native else "pending",
     )
@@ -608,14 +648,21 @@ async def get_uploaded_file(file_id: str):
         raise HTTPException(status_code=404, detail="Upload not found")
 
     file_path = Path(upload["file_path"])
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found on disk")
+    if file_path.exists():
+        return FileResponse(
+            path=str(file_path),
+            media_type=upload["content_type"],
+            filename=upload["original_filename"],
+        )
 
-    return FileResponse(
-        path=str(file_path),
-        media_type=upload["content_type"],
-        filename=upload["original_filename"],
-    )
+    if upload.get("file_data"):
+        return Response(
+            content=bytes(upload["file_data"]),
+            media_type=upload["content_type"],
+            headers={"Content-Disposition": f'inline; filename="{upload["original_filename"]}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="File not found")
 
 
 @app.get("/uploads/{file_id}/table")
@@ -633,7 +680,12 @@ async def get_upload_as_table(file_id: str) -> dict[str, Any]:
 
     file_path = Path(upload["file_path"])
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found on disk")
+        if upload.get("file_data"):
+            UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(bytes(upload["file_data"]))
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
 
     try:
         parsed = parse_spreadsheet(file_path, content_type)
@@ -692,3 +744,5 @@ async def health():
         "transcription": "available" if avail["available"]
                          else f"unavailable: {', '.join(avail['missing'])}",
     }
+
+
