@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """,
+    """
+CREATE TABLE IF NOT EXISTS upload_keyframes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    upload_id TEXT NOT NULL,
+    frame_idx INTEGER NOT NULL,
+    frame_data BLOB NOT NULL,
+    caption TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+""",
 ]
 
 # ---------------------------------------------------------------------------
@@ -153,6 +163,16 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT
 );
 """,
+    """
+CREATE TABLE IF NOT EXISTS upload_keyframes (
+    id SERIAL PRIMARY KEY,
+    upload_id TEXT NOT NULL,
+    frame_idx INTEGER NOT NULL,
+    frame_data BYTEA NOT NULL,
+    caption TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC')::TEXT
+);
+""",
 ]
 
 # ---------------------------------------------------------------------------
@@ -169,6 +189,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversations(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_uploads_session ON uploads(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_keyframes_upload ON upload_keyframes(upload_id)",
 ]
 
 # ---------------------------------------------------------------------------

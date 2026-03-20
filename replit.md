@@ -51,6 +51,16 @@ workspace/
 - METADATA_DB_DIR: optional override for SQLite database directory (defaults to agent/ package dir)
 
 ## Recent Changes
+- 2026-03-20: Video keyframe storage refactor — fixes OOM crash on large videos
+  - New `upload_keyframes` table: one row per frame (BYTEA), replacing the single huge `extracted_images_json` blob
+  - `extract_keyframes_gen` async generator in `transcribe.py`: yields one PNG at a time, writes to disk, reads back, yields, deletes — only one frame in Python memory at any point
+  - `_extract_and_store` in `server.py` now has a dedicated video path: consumes the generator and calls `save_keyframe()` per frame before moving to the next
+  - Extraction status poll (`/uploads/{id}/extraction`) uses `COUNT(*)` on `upload_keyframes` for image count — no image bytes loaded just to count frames
+  - `get_upload_extraction` loads from `upload_keyframes` first; falls back to old `extracted_images_json` for backward compat with uploads created before this change
+  - `extract_video` in `extractors.py` is now a stub (kept so MIME types stay in the allowed set; actual extraction happens in `server.py`)
+  - Fixed `size_bytes` column: `INTEGER` → `BIGINT` in PostgreSQL DDL (max was 2.1GB, videos can be larger)
+  - `UPLOADS_DIR` moved from shared env var to production-only; dev now defaults to `workspace/uploads/` (253GB) instead of `/tmp/uploads` (2GB Replit quota)
+
 - 2026-03-04: Dual database backend (PostgreSQL + SQLite)
   - `agent/db/database.py`: `Database` ABC with `PostgresDatabase` and `SQLiteDatabase` implementations
   - Auto-selects backend: `DATABASE_URL` set → PostgreSQL (asyncpg pool), unset → SQLite (aiosqlite)

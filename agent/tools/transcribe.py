@@ -204,6 +204,66 @@ async def _probe_duration(src: Path) -> float:
         return 0.0
 
 
+async def extract_keyframes_gen(
+    src: Path,
+    count: int | None = None,
+):
+    """Async generator: yield (png_bytes, caption) one frame at a time.
+
+    Writes each frame to a temp file, reads it, yields it, then deletes it
+    immediately. Only one frame worth of bytes is in memory at any point.
+    Use this for large videos to avoid accumulating all frames in RAM.
+    """
+    ffmpeg = find_binary("ffmpeg")
+    if ffmpeg is None:
+        raise TranscriptionUnavailable("ffmpeg not found on PATH")
+
+    duration = await _probe_duration(src)
+
+    if count is None:
+        if duration > 0:
+            count = max(_KEYFRAME_MIN, min(_KEYFRAME_MAX, int(duration // _KEYFRAME_SEC_PER_FRAME)))
+        else:
+            count = _KEYFRAME_MIN
+
+    if duration <= 0:
+        timestamps = [0.0]
+    else:
+        upper = max(0.0, duration - 0.1)
+        if count <= 1:
+            timestamps = [upper / 2]
+        else:
+            step = upper / (count - 1)
+            timestamps = [min(upper, max(0.0, i * step)) for i in range(count)]
+
+    tmpdir = Path(tempfile.mkdtemp())
+    try:
+        for i, ts in enumerate(timestamps):
+            out_png = tmpdir / f"frame_{i}.png"
+            argv = [
+                ffmpeg, "-y",
+                "-ss", f"{ts:.2f}",
+                "-i", str(src),
+                "-frames:v", "1",
+                "-vf", "scale=1024:-1",
+                str(out_png),
+            ]
+            try:
+                rc, _, _ = await _run(argv, timeout=30)
+            except Exception:
+                continue
+            if rc != 0 or not out_png.exists():
+                continue
+            if out_png.stat().st_size > 5_000_000:
+                out_png.unlink(missing_ok=True)
+                continue
+            data = out_png.read_bytes()
+            out_png.unlink(missing_ok=True)
+            yield (data, f"Frame at {ts:.1f}s")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 async def extract_keyframes(src: Path, count: int | None = None) -> list[tuple[bytes, str]]:
     """Pull evenly-spaced PNG frames from a video.
 

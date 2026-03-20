@@ -449,20 +449,52 @@ async def _extract_and_store(upload_id: str, path: Path, content_type: str) -> N
     Swallows all exceptions — a background failure must never crash the
     server. On any error the upload row is marked status='error' so the
     chat path can surface a readable message to the user.
+
+    Videos use a streaming path: keyframes are yielded one at a time from
+    extract_keyframes_gen and written to the upload_keyframes table
+    immediately, so only one PNG is ever in Python memory at once.
     """
     from .tools.extractors import extract
-    from .tools.metadata_store import set_upload_extraction
+    from .tools.metadata_store import save_keyframe, set_upload_extraction
+    from .tools.transcribe import _probe_duration, extract_keyframes_gen
+
+    is_video = content_type.startswith("video/") or path.suffix.lower() in _VIDEO_EXTS
 
     async with _EXTRACTION_SEMAPHORE:
         try:
-            result = await extract(path, content_type)
-            await set_upload_extraction(
-                upload_id,
-                text=result.text,
-                images=result.images,
-                meta=result.meta,
-                error=result.error,
-            )
+            if is_video:
+                # Streaming keyframe path — no bulk bytes accumulation.
+                frame_idx = 0
+                err: str | None = None
+                try:
+                    async for frame_bytes, caption in extract_keyframes_gen(path):
+                        await save_keyframe(upload_id, frame_idx, frame_bytes, caption)
+                        frame_idx += 1
+                except Exception as kf_exc:
+                    err = f"Keyframe extraction failed: {kf_exc}"
+                    logger.exception("Keyframe extraction error for %s", upload_id)
+
+                duration = await _probe_duration(path)
+                await set_upload_extraction(
+                    upload_id,
+                    text="",
+                    images=[],
+                    meta={
+                        "keyframes": frame_idx,
+                        "duration_sec": round(duration, 1),
+                        "transcript_pending": frame_idx > 0,
+                    },
+                    error=err if frame_idx == 0 else None,
+                )
+            else:
+                result = await extract(path, content_type)
+                await set_upload_extraction(
+                    upload_id,
+                    text=result.text,
+                    images=result.images,
+                    meta=result.meta,
+                    error=result.error,
+                )
         except Exception as exc:
             logger.exception("Background extraction failed for %s", upload_id)
             try:
@@ -623,10 +655,14 @@ async def get_upload_extraction_endpoint(file_id: str):
     Does not return image bytes — only counts — to keep the response small.
     The frontend polls this to know when an upload is ready to reference
     in chat.
-    """
-    from .tools.metadata_store import get_upload_extraction
 
-    result = await get_upload_extraction(file_id)
+    Image count is read from the upload_keyframes table (COUNT(*)) for
+    videos, or from the meta.keyframes field if already set, so no image
+    bytes are ever loaded just for a status poll.
+    """
+    from .tools.metadata_store import get_upload_status
+
+    result = await get_upload_status(file_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Upload not found")
 
@@ -635,7 +671,7 @@ async def get_upload_extraction_endpoint(file_id: str):
         "text_preview": (result["text"] or "")[:500],
         "meta": result["meta"],
         "error": result["error"],
-        "image_count": len(result["images"]),
+        "image_count": result["image_count"],
     }
 
 
