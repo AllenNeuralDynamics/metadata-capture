@@ -550,7 +550,7 @@ async def get_upload_extraction(upload_id: str) -> dict[str, Any] | None:
         "text": row["extracted_text"],
         "images": images,
         "meta": meta,
-        "error": decode_error or stored_error,
+        "error": stored_error,
     }
 
 
