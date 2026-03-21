@@ -1,10 +1,7 @@
 uploads/
-.pythonlibs/
 .cache/
 .local/
 .config/
-frontend/.next/
-frontend/node_modules/
 __pycache__/
 *.pyc
 *.pyo
