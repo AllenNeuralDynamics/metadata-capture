@@ -124,6 +124,13 @@ workspace/
   - `UPLOADS_DIR` is now an env var (default: `workspace/uploads/`, Replit: `/tmp/uploads`)
   - Removed all migration/drift-detection logic from `database.py` — `init_tables` just runs DDL
   - Removed `UPLOADS_EXTRACTION_COLUMNS` from models.py — no duplicated column lists
+- 2026-03-24: MCP cold-start improvements
+  - Removed `nwb_tools` import from `data_access_server.py` — boto3 + hdmf_zarr were adding 20-40s of startup latency; those NWB tools are not in the allowed list anyway
+  - SDK client pool warmup now non-blocking: `lifespan` calls `pool.start()` (fire-and-forget) and yields immediately so health checks pass. The pool warms in the background (~90-200s in production)
+  - `chat()` falls through to per-request `query()` immediately if pool not warm — no blocking wait that would freeze the first request
+  - Added `start()` and `await_warm(timeout)` methods to `SDKClientPool` for finer warmup control
+  - MongoDB connection in MCP tools is lazy (per tool call via `setup_mongodb_client()`) — NOT at MCP subprocess startup
+
 - 2026-03-17: Production MCP fixes
   - Build command now installs Python deps (`pip install -r agent/requirements.txt && pip install -e ./aind-metadata-mcp`) before frontend build — ensures aind-metadata-mcp is available in production container
   - SDK pool warmup timeout increased from 30s → 60s (MCP startup takes ~33s in production due to MongoDB connection latency)

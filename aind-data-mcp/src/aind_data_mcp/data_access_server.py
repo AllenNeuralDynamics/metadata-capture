@@ -2,10 +2,12 @@
 
 from pathlib import Path
 
-# Import tool modules — side-effect registers all @mcp.tool() decorators
+# Import tool modules — side-effect registers all @mcp.tool() decorators.
+# nwb_tools is intentionally excluded: it imports boto3 + hdmf_zarr which
+# add 20-40s of cold-start latency and those tools are not in the allowed
+# list in service.py anyway.
 from .mcp_instance import mcp  # noqa: F401
 from . import example_tools  # noqa: F401
-from . import nwb_tools  # noqa: F401
 from . import query_tools  # noqa: F401
 from . import schema_tools  # noqa: F401
 
