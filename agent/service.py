@@ -134,12 +134,10 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
     # non-interactive subprocess with no TTY, so the default permission mode
     # would block network requests with unanswerable approval prompts.
     # bypassPermissions skips those prompts, letting MCP tool HTTP calls
-    # reach api.allenneuraldynamics.org without being blocked.
-    # WebSearch removed — it's a CLI built-in that also triggers network
-    # approval prompts and is not needed for the capture workflow.
+    # reach api.allenneuraldynamics.org and WebSearch calls go through.
     opts = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        allowed_tools=["Read"] + capture_tools + aind_mcp_tools,
+        allowed_tools=["Read", "WebSearch"] + capture_tools + aind_mcp_tools,
         max_turns=15,
         model=model if model in AVAILABLE_MODELS else DEFAULT_MODEL,
         mcp_servers=mcp_servers,
