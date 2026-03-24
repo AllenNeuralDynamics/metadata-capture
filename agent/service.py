@@ -654,7 +654,26 @@ async def chat(
     full_response: list[str] = []
 
     pool = get_pool()
-    use_pool = pool is not None and pool.is_warm and os.environ.get("USE_SDK_POOL", "0") == "1"
+    use_sdk_pool = os.environ.get("USE_SDK_POOL", "0") == "1"
+    if pool is not None and use_sdk_pool and not pool.is_warm:
+        # Pool is still connecting to MCP/MongoDB — wait up to 120s before
+        # falling back to per-request query(). MCP cold-start in production
+        # takes ~90s (subprocess boot + MongoDB handshake). Without waiting
+        # here, requests that arrive during the warmup window fall back to a
+        # per-request subprocess that has the same MCP startup cost AND can't
+        # share the connection, so MCP tools are effectively unavailable for
+        # the first 1-2 minutes after each cold start.
+        logger.info("Pool not yet warm for session %s — waiting up to 120s", session_id)
+        print(f"[pool] Waiting for warmup (session {session_id})...", flush=True)
+        warmed = await pool.await_warm(timeout=120)
+        if warmed:
+            logger.info("Pool warmed while waiting for session %s (connect=%.0fms)",
+                        session_id, pool._connect_ms)
+            print(f"[pool] Warm after wait (connect={pool._connect_ms:.0f}ms)", flush=True)
+        else:
+            logger.warning("Pool still not warm after 120s — falling back to per-request query()")
+            print("[pool] Still not warm after 120s — using per-request fallback", flush=True)
+    use_pool = pool is not None and pool.is_warm and use_sdk_pool
     path = "pool" if use_pool else "query()"
     logger.info("Chat path=%s for session %s", path, session_id)
 

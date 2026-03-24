@@ -75,11 +75,36 @@ class SDKClientPool:
         # Wall time of the connect() — lets the caller log warm-vs-cold.
         self._connect_ms: float = 0.0
 
+    def start(self) -> None:
+        """Start the pool worker in the background without blocking.
+
+        Returns immediately — the worker task runs concurrently and sets
+        _ready when connect() finishes. Use await_warm() to wait for it.
+        """
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run(), name="sdk-client-pool")
+
+    async def await_warm(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for the pool to become warm.
+
+        Returns True if the pool is warm, False if the timeout elapsed.
+        Safe to call even before start() — returns False immediately.
+        """
+        if self.is_warm:
+            return True
+        if self._worker is None:
+            return False
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready.wait()), timeout=timeout)
+            return self.is_warm
+        except asyncio.TimeoutError:
+            return False
+
     async def warmup(self):
         """Start the worker task and wait for it to connect.
 
-        Call this from FastAPI lifespan startup so the first chat
-        request doesn't pay the 4s spawn cost.
+        Legacy blocking API kept for compatibility. Prefer start() +
+        await_warm() so callers can control the timeout independently.
         """
         if self._worker is not None:
             return

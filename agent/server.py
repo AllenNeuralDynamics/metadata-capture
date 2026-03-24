@@ -83,20 +83,14 @@ async def lifespan(app: FastAPI):
 
     if os.environ.get("USE_SDK_POOL", "0") == "1":
         pool = init_pool(_get_options)
-        print("[lifespan] Warming SDK client pool...", flush=True)
+        print("[lifespan] Starting SDK client pool warmup in background...", flush=True)
         try:
-            await asyncio.wait_for(pool.warmup(), timeout=60)
-            print("[lifespan] SDK client pool warm", flush=True)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "SDK client pool warmup timed out after 60s — chat() will fall back to "
-                "per-request query() (~4s slower)."
-            )
-            print("[lifespan] SDK client pool warmup timed out", flush=True)
+            pool.start()
+            print("[lifespan] SDK client pool warmup started (MCP+MongoDB may take ~90s)", flush=True)
         except Exception:
             logger.exception(
-                "SDK client pool warmup failed — chat() will fall back to "
-                "per-request query() (~4s slower). Set USE_SDK_POOL=0 to silence."
+                "SDK client pool warmup failed to start — chat() will fall back to "
+                "per-request query(). Set USE_SDK_POOL=0 to silence."
             )
 
     yield
