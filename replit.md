@@ -124,6 +124,14 @@ workspace/
   - `UPLOADS_DIR` is now an env var (default: `workspace/uploads/`, Replit: `/tmp/uploads`)
   - Removed all migration/drift-detection logic from `database.py` — `init_tables` just runs DDL
   - Removed `UPLOADS_EXTRACTION_COLUMNS` from models.py — no duplicated column lists
+- 2026-03-24: Pool auto-reconnect — fixes AIND tools dropping mid-thread
+  - `_run()` now wraps connect+query loop in an outer reconnect loop
+  - Noisy failure: `_handle()` raises → `_ready` cleared → inner loop breaks → reconnect after 5s
+  - Silent failure: MCP subprocess dies without exception (Claude marks tools gone, pool stays "warm") → 30-minute idle timeout on `Queue.get()` triggers proactive reconnect to refresh MCP subprocess
+  - Single cleanup `finally` block handles all exit routes (break, exception, CancelledError) — no double-reset of `stream_events` token
+  - `connect_failed` flag distinguishes "failed to connect" (60s retry) from "normal reconnect" (5s)
+  - Shutdown via `None` sentinel still works; `cancel()` interrupts any sleep cleanly
+
 - 2026-03-24: MCP cold-start improvements
   - Removed `nwb_tools` import from `data_access_server.py` — boto3 + hdmf_zarr were adding 20-40s of startup latency; those NWB tools are not in the allowed list anyway
   - SDK client pool warmup now non-blocking: `lifespan` calls `pool.start()` (fire-and-forget) and yields immediately so health checks pass. The pool warms in the background (~90-200s in production)

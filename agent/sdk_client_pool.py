@@ -160,38 +160,83 @@ class SDKClientPool:
             yield item
 
     async def _run(self):
-        # Build options once — the worker's client is single-model at
-        # connect time but set_model() swaps it per request.
-        opts = self._options_factory(None)
-        client = ClaudeSDKClient(options=opts)
+        """Worker task — owns one ClaudeSDKClient and auto-reconnects on failure.
 
-        # Set stream_events BEFORE connect(). connect() spawns the SDK's
-        # stdio reader task, which handles tool callbacks from the claude
-        # CLI subprocess. That task inherits the contextvar value at spawn
-        # time — if we set it in _handle() (after the reader task already
-        # exists), the reader's copy stays None and handler pushes silently
-        # drop. A single long-lived queue works because size=1 serialises
-        # requests; _handle() drains it fully between runs.
-        self._tool_q: asyncio.Queue = asyncio.Queue()
-        token = stream_events.set(self._tool_q)
+        Two failure modes handled:
+        1. Noisy failure: _handle() raises (BrokenPipeError, etc.) →
+           _ready cleared → inner loop breaks → reconnect after 5s.
+        2. Silent failure: MCP subprocess dies without exception →
+           Claude marks AIND tools gone → pool appears warm but tools
+           unavailable → we proactively reconnect after IDLE_RECONNECT_S
+           seconds of inactivity (a long idle means no one is using
+           the session, so reconnect to refresh MCP subprocess state).
 
-        t0 = time.perf_counter()
-        await client.connect()
-        self._connect_ms = (time.perf_counter() - t0) * 1000
-        self._ready.set()
+        On each reconnect cycle, stream_events contextvar is re-set on
+        the fresh Queue so tool callbacks in the new client context land
+        in the right queue.
+        """
+        RECONNECT_DELAY_S = 5         # pause between reconnect cycles after failure
+        CONNECT_RETRY_DELAY_S = 60    # pause before retrying a failed connect()
+        IDLE_RECONNECT_S = 1800.0     # proactively reconnect after 30 min idle
 
-        try:
-            while True:
-                work = await self._in_q.get()
-                if work is None:
-                    break
-                await self._handle(client, work)
-        finally:
-            stream_events.reset(token)
+        while True:
+            opts = self._options_factory(None)
+            client = ClaudeSDKClient(options=opts)
+
+            # Set stream_events BEFORE connect(). connect() spawns the SDK's
+            # stdio reader task which inherits contextvar at spawn time.
+            # Reset and re-set on each cycle so the fresh client gets its
+            # own queue; stale references from old cycles are gone.
+            self._tool_q = asyncio.Queue()
+            token = stream_events.set(self._tool_q)
+
+            reconnect_reason: str = "idle"
+            connect_failed = False
             try:
-                await client.disconnect()
+                t0 = time.perf_counter()
+                await client.connect()
+                self._connect_ms = (time.perf_counter() - t0) * 1000
+                self._ready.set()
+                logger.info("SDK client pool ready (connect=%.0fms)", self._connect_ms)
+
+                while True:
+                    # Wait for work; timeout triggers a proactive reconnect
+                    # so we don't hold a potentially-dead MCP connection forever.
+                    try:
+                        work = await asyncio.wait_for(
+                            self._in_q.get(), timeout=IDLE_RECONNECT_S
+                        )
+                    except asyncio.TimeoutError:
+                        reconnect_reason = f"idle>{IDLE_RECONNECT_S:.0f}s"
+                        break  # outer loop reconnects
+
+                    if work is None:
+                        return  # shutdown signal
+
+                    await self._handle(client, work)
+                    if not self._ready.is_set():
+                        reconnect_reason = "handle-failure"
+                        break  # outer loop reconnects
+
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.exception("Error during client disconnect")
+                logger.exception("Pool connect() failed")
+                connect_failed = True
+            finally:
+                # Single cleanup path for all exit routes (normal break,
+                # exception, CancelledError). ready and token are always
+                # cleared here — no double-reset in the except block.
+                self._ready.clear()
+                stream_events.reset(token)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    logger.exception("Error disconnecting pool client")
+
+            delay = CONNECT_RETRY_DELAY_S if connect_failed else RECONNECT_DELAY_S
+            logger.info("Pool reconnecting (%s) in %ds...", reconnect_reason, delay)
+            await asyncio.sleep(delay)
 
     async def _handle(self, client: ClaudeSDKClient, work: _Work):
         """Run one query and stream results to work.out_q.
