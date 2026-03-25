@@ -127,11 +127,11 @@ workspace/
 - 2026-03-24: Pool auto-reconnect — fixes AIND tools dropping mid-thread
   - `_run()` now wraps connect+query loop in an outer reconnect loop
   - Noisy failure: `_handle()` raises → `_ready` cleared → inner loop breaks → reconnect after 5s
-  - Silent failure: MCP subprocess dies without exception (Claude marks tools gone, pool stays "warm") → 30-minute idle timeout on `Queue.get()` triggers proactive reconnect to refresh MCP subprocess
+  - Silent failure: MCP subprocess dies without exception (Claude marks tools gone, pool stays "warm") → watchdog health check detects it and sets `_needs_reconnect`; worker picks this up on its next 30s poll cycle
   - Single cleanup `finally` block handles all exit routes (break, exception, CancelledError) — no double-reset of `stream_events` token
   - `connect_failed` flag distinguishes "failed to connect" (60s retry) from "normal reconnect" (5s)
   - Shutdown via `None` sentinel still works; `cancel()` interrupts any sleep cleanly
-  - MCP-unavailability detection: `chat()` checks response text for "aind-data-mcp" / "MCP server" + "reconnect" / "not available"; if found, clears `_ready` to force immediate pool reconnect so the next query works
+  - MCP-unavailability detection: `chat()` checks response text for "aind-data-mcp" / "MCP server" + "reconnect" / "not available"; if found, sets `_needs_reconnect` so the worker reconnects on its next poll cycle
   - MCP watchdog: background task runs a real MCP health check every 2 min — starts a fresh aind-data-mcp subprocess, connects via MCP protocol (stdio), calls `initialize` + `list_tools`, verifies tools are registered, then cleans up. If check fails, forces immediate reconnect. If healthy and pool age > 5 min, forces reconnect to refresh the pool's MCP subprocess
   - Pool `_run()` polls every 30s (down from 5 min idle timeout) so it picks up the watchdog's `_needs_reconnect` flag promptly
   - `start()` launches both the worker task and the watchdog task

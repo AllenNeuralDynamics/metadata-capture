@@ -702,7 +702,7 @@ async def chat(
         )
         if _mcp_dead:
             logger.warning("Detected MCP unavailability in agent response — forcing pool reconnect")
-            pool._ready.clear()
+            pool._needs_reconnect = True
 
     if assistant_text.strip():
         try:

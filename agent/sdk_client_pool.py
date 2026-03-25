@@ -180,6 +180,13 @@ class SDKClientPool:
         least one tool, False otherwise. The subprocess is always killed
         after the check.
         """
+        # When MCP is intentionally disabled for perf isolation, the pool's
+        # client has no AIND MCP attached — probing here would just churn
+        # spurious reconnects (or fail outright if deps are missing, the
+        # usual reason to set the flag).
+        if os.environ.get("SKIP_AIND_MCP") == "1":
+            return True
+
         from mcp import StdioServerParameters
         from mcp.client.stdio import stdio_client
         from mcp import ClientSession
@@ -271,11 +278,14 @@ class SDKClientPool:
     async def _run(self):
         """Worker task — owns one ClaudeSDKClient and auto-reconnects on failure.
 
-        Three reconnect triggers:
+        Two reconnect triggers:
         1. Noisy failure: _handle() raises → _ready cleared → reconnect.
-        2. Idle timeout: no work for POLL_TIMEOUT_S → reconnect.
-        3. Watchdog: _needs_reconnect flag set by background health
-           check → reconnect on next poll cycle.
+        2. Watchdog/heuristic: _needs_reconnect flag set (by background
+           health check or by service.py's MCP-dead heuristic) → picked
+           up on the next POLL_TIMEOUT_S wake cycle.
+
+        Idle timeout alone does NOT reconnect — it exists only to wake
+        the worker so it can check the flag.
 
         On each reconnect cycle, stream_events contextvar is re-set on
         the fresh Queue so tool callbacks in the new client context land
