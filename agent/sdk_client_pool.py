@@ -27,8 +27,11 @@ its own queue and forward drained events into out_queue with a marker.
 
 import asyncio
 import logging
+import os
+import sys
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import ClaudeSDKClient
@@ -66,20 +69,52 @@ class SDKClientPool:
     multi-worker, this becomes one pool per worker (process-local).
     """
 
+    HEALTH_CHECK_INTERVAL_S = 120   # check every 2 min
+    MAX_POOL_AGE_S = 300            # force reconnect after 5 min
+
     def __init__(self, options_factory):
         """options_factory(model) -> ClaudeAgentOptions (or cached)."""
         self._options_factory = options_factory
         self._in_q: asyncio.Queue[_Work | None] = asyncio.Queue(maxsize=1)
         self._worker: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
         self._ready = asyncio.Event()
-        # Wall time of the connect() — lets the caller log warm-vs-cold.
+        self._needs_reconnect = False
+        self._connect_monotonic: float = 0.0
         self._connect_ms: float = 0.0
+
+    def start(self) -> None:
+        """Start the pool worker and MCP watchdog in the background.
+
+        Returns immediately — the worker task runs concurrently and sets
+        _ready when connect() finishes. Use await_warm() to wait for it.
+        """
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run(), name="sdk-client-pool")
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog(), name="mcp-watchdog")
+
+    async def await_warm(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for the pool to become warm.
+
+        Returns True if the pool is warm, False if the timeout elapsed.
+        Safe to call even before start() — returns False immediately.
+        """
+        if self.is_warm:
+            return True
+        if self._worker is None:
+            return False
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready.wait()), timeout=timeout)
+            return self.is_warm
+        except asyncio.TimeoutError:
+            return False
 
     async def warmup(self):
         """Start the worker task and wait for it to connect.
 
-        Call this from FastAPI lifespan startup so the first chat
-        request doesn't pay the 4s spawn cost.
+        Legacy blocking API kept for compatibility. Prefer start() +
+        await_warm() so callers can control the timeout independently.
         """
         if self._worker is not None:
             return
@@ -99,6 +134,9 @@ class SDKClientPool:
         logger.info("SDK client pool warm: connect took %.0fms", self._connect_ms)
 
     async def shutdown(self):
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
         if self._worker is None:
             return
         await self._in_q.put(None)  # signals worker to disconnect
@@ -134,39 +172,197 @@ class SDKClientPool:
                 raise item.exc
             yield item
 
-    async def _run(self):
-        # Build options once — the worker's client is single-model at
-        # connect time but set_model() swaps it per request.
-        opts = self._options_factory(None)
-        client = ClaudeSDKClient(options=opts)
+    async def _check_mcp_health(self) -> bool:
+        """Start a fresh aind-data-mcp subprocess and verify it registers tools.
 
-        # Set stream_events BEFORE connect(). connect() spawns the SDK's
-        # stdio reader task, which handles tool callbacks from the claude
-        # CLI subprocess. That task inherits the contextvar value at spawn
-        # time — if we set it in _handle() (after the reader task already
-        # exists), the reader's copy stays None and handler pushes silently
-        # drop. A single long-lived queue works because size=1 serialises
-        # requests; _handle() drains it fully between runs.
-        self._tool_q: asyncio.Queue = asyncio.Queue()
-        token = stream_events.set(self._tool_q)
+        Uses the MCP protocol (JSON-RPC over stdio) to connect, initialize,
+        and list tools. Returns True if the server starts and exposes at
+        least one tool, False otherwise. The subprocess is always killed
+        after the check.
+        """
+        # When MCP is intentionally disabled for perf isolation, the pool's
+        # client has no AIND MCP attached — probing here would just churn
+        # spurious reconnects (or fail outright if deps are missing, the
+        # usual reason to set the flag).
+        if os.environ.get("SKIP_AIND_MCP") == "1":
+            return True
 
-        t0 = time.perf_counter()
-        await client.connect()
-        self._connect_ms = (time.perf_counter() - t0) * 1000
-        self._ready.set()
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mcp import ClientSession
+
+        mcp_server_dir = Path(os.environ.get(
+            "MCP_SERVER_DIR",
+            str(Path(__file__).resolve().parent.parent / "aind-data-mcp"),
+        ))
+        mcp_src = mcp_server_dir / "src"
+        if not mcp_src.is_dir():
+            logger.warning("MCP health check: src dir not found at %s", mcp_src)
+            return False
+
+        mcp_python = os.environ.get("AIND_MCP_PYTHON", sys.executable)
+        existing_pypath = os.environ.get("PYTHONPATH", "")
+        new_pypath = f"{mcp_src}:{existing_pypath}" if existing_pypath else str(mcp_src)
+        mcp_env = {**os.environ, "PYTHONPATH": new_pypath, "PYTHONUNBUFFERED": "1"}
+
+        server_params = StdioServerParameters(
+            command=mcp_python,
+            args=["-m", "aind_data_mcp.data_access_server"],
+            env=mcp_env,
+        )
 
         try:
-            while True:
-                work = await self._in_q.get()
-                if work is None:
-                    break
-                await self._handle(client, work)
-        finally:
-            stream_events.reset(token)
+            async with stdio_client(server_params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await asyncio.wait_for(session.initialize(), timeout=30.0)
+                    result = await asyncio.wait_for(session.list_tools(), timeout=10.0)
+                    tool_count = len(result.tools) if result.tools else 0
+                    tool_names = [t.name for t in result.tools] if result.tools else []
+                    logger.info(
+                        "MCP health check: %d tools registered: %s",
+                        tool_count, tool_names,
+                    )
+                    return tool_count > 0
+        except asyncio.TimeoutError:
+            logger.warning("MCP health check: timed out connecting to aind-data-mcp")
+            return False
+        except Exception:
+            logger.exception("MCP health check: failed to connect to aind-data-mcp")
+            return False
+
+    async def _watchdog(self):
+        """Background task: periodically verify the local MCP server is
+        healthy and force a pool reconnect when it's stale.
+
+        Every HEALTH_CHECK_INTERVAL_S:
+        1. Start a fresh aind-data-mcp subprocess and check it registers
+           tools via MCP protocol — this verifies the server code, its
+           Python deps, and any external connections (MongoDB) all work.
+        2. If healthy AND pool connection is older than MAX_POOL_AGE_S,
+           set _needs_reconnect so _run() picks it up on the next poll.
+        3. If unhealthy, force immediate reconnect (the pool's MCP
+           subprocess may have died).
+        """
+        while True:
             try:
-                await client.disconnect()
+                await asyncio.sleep(self.HEALTH_CHECK_INTERVAL_S)
+
+                healthy = await self._check_mcp_health()
+
+                if not healthy:
+                    logger.warning(
+                        "MCP watchdog: aind-data-mcp health check FAILED — forcing reconnect"
+                    )
+                    self._needs_reconnect = True
+                    continue
+
+                if not self.is_warm:
+                    logger.info("MCP watchdog: pool not warm, skipping age check")
+                    continue
+
+                age = time.monotonic() - self._connect_monotonic
+                if age > self.MAX_POOL_AGE_S:
+                    logger.info(
+                        "MCP watchdog: pool age %.0fs > %ds and MCP healthy — requesting reconnect",
+                        age, self.MAX_POOL_AGE_S,
+                    )
+                    self._needs_reconnect = True
+                else:
+                    logger.debug("MCP watchdog: pool age %.0fs OK, MCP healthy", age)
+
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.exception("Error during client disconnect")
+                logger.exception("MCP watchdog: unexpected error")
+
+    async def _run(self):
+        """Worker task — owns one ClaudeSDKClient and auto-reconnects on failure.
+
+        Two reconnect triggers:
+        1. Noisy failure: _handle() raises → _ready cleared → reconnect.
+        2. Watchdog/heuristic: _needs_reconnect flag set (by background
+           health check or by service.py's MCP-dead heuristic) → picked
+           up on the next POLL_TIMEOUT_S wake cycle.
+
+        Idle timeout alone does NOT reconnect — it exists only to wake
+        the worker so it can check the flag.
+
+        On each reconnect cycle, stream_events contextvar is re-set on
+        the fresh Queue so tool callbacks in the new client context land
+        in the right queue.
+        """
+        RECONNECT_DELAY_S = 5         # pause between reconnect cycles after failure
+        CONNECT_RETRY_DELAY_S = 60    # pause before retrying a failed connect()
+        POLL_TIMEOUT_S = 30.0         # wake every 30s to check watchdog flag
+
+        while True:
+            opts = self._options_factory(None)
+            client = ClaudeSDKClient(options=opts)
+
+            # Set stream_events BEFORE connect(). connect() spawns the SDK's
+            # stdio reader task which inherits contextvar at spawn time.
+            # Reset and re-set on each cycle so the fresh client gets its
+            # own queue; stale references from old cycles are gone.
+            self._tool_q = asyncio.Queue()
+            token = stream_events.set(self._tool_q)
+
+            reconnect_reason: str = "idle"
+            connect_failed = False
+            try:
+                t0 = time.perf_counter()
+                await client.connect()
+                self._connect_ms = (time.perf_counter() - t0) * 1000
+                self._connect_monotonic = time.monotonic()
+                self._needs_reconnect = False
+                self._ready.set()
+                logger.info("SDK client pool ready (connect=%.0fms)", self._connect_ms)
+
+                while True:
+                    # Poll with short timeout so we can check the watchdog
+                    # reconnect flag regularly (every 30s).
+                    try:
+                        work = await asyncio.wait_for(
+                            self._in_q.get(), timeout=POLL_TIMEOUT_S
+                        )
+                    except asyncio.TimeoutError:
+                        if self._needs_reconnect:
+                            self._needs_reconnect = False
+                            reconnect_reason = "watchdog"
+                            break
+                        continue  # keep polling
+
+                    if work is None:
+                        return  # shutdown signal
+
+                    await self._handle(client, work)
+                    if not self._ready.is_set():
+                        reconnect_reason = "handle-failure"
+                        break
+
+                    if self._needs_reconnect:
+                        self._needs_reconnect = False
+                        reconnect_reason = "watchdog"
+                        break
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Pool connect() failed")
+                connect_failed = True
+            finally:
+                # Single cleanup path for all exit routes (normal break,
+                # exception, CancelledError). ready and token are always
+                # cleared here — no double-reset in the except block.
+                self._ready.clear()
+                stream_events.reset(token)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    logger.exception("Error disconnecting pool client")
+
+            delay = CONNECT_RETRY_DELAY_S if connect_failed else RECONNECT_DELAY_S
+            logger.info("Pool reconnecting (%s) in %ds...", reconnect_reason, delay)
+            await asyncio.sleep(delay)
 
     async def _handle(self, client: ClaudeSDKClient, work: _Work):
         """Run one query and stream results to work.out_q.

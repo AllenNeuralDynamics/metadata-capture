@@ -124,6 +124,25 @@ workspace/
   - `UPLOADS_DIR` is now an env var (default: `workspace/uploads/`, Replit: `/tmp/uploads`)
   - Removed all migration/drift-detection logic from `database.py` — `init_tables` just runs DDL
   - Removed `UPLOADS_EXTRACTION_COLUMNS` from models.py — no duplicated column lists
+- 2026-03-24: Pool auto-reconnect — fixes AIND tools dropping mid-thread
+  - `_run()` now wraps connect+query loop in an outer reconnect loop
+  - Noisy failure: `_handle()` raises → `_ready` cleared → inner loop breaks → reconnect after 5s
+  - Silent failure: MCP subprocess dies without exception (Claude marks tools gone, pool stays "warm") → watchdog health check detects it and sets `_needs_reconnect`; worker picks this up on its next 30s poll cycle
+  - Single cleanup `finally` block handles all exit routes (break, exception, CancelledError) — no double-reset of `stream_events` token
+  - `connect_failed` flag distinguishes "failed to connect" (60s retry) from "normal reconnect" (5s)
+  - Shutdown via `None` sentinel still works; `cancel()` interrupts any sleep cleanly
+  - MCP-unavailability detection: `chat()` checks response text for "aind-data-mcp" / "MCP server" + "reconnect" / "not available"; if found, sets `_needs_reconnect` so the worker reconnects on its next poll cycle
+  - MCP watchdog: background task runs a real MCP health check every 2 min — starts a fresh aind-data-mcp subprocess, connects via MCP protocol (stdio), calls `initialize` + `list_tools`, verifies tools are registered, then cleans up. If check fails, forces immediate reconnect. If healthy and pool age > 5 min, forces reconnect to refresh the pool's MCP subprocess
+  - Pool `_run()` polls every 30s (down from 5 min idle timeout) so it picks up the watchdog's `_needs_reconnect` flag promptly
+  - `start()` launches both the worker task and the watchdog task
+
+- 2026-03-24: MCP cold-start improvements
+  - Removed `nwb_tools` import from `data_access_server.py` — boto3 + hdmf_zarr were adding 20-40s of startup latency; those NWB tools are not in the allowed list anyway
+  - SDK client pool warmup now non-blocking: `lifespan` calls `pool.start()` (fire-and-forget) and yields immediately so health checks pass. The pool warms in the background (~90-200s in production)
+  - `chat()` falls through to per-request `query()` immediately if pool not warm — no blocking wait that would freeze the first request
+  - Added `start()` and `await_warm(timeout)` methods to `SDKClientPool` for finer warmup control
+  - MongoDB connection in MCP tools is lazy (per tool call via `setup_mongodb_client()`) — NOT at MCP subprocess startup
+
 - 2026-03-17: Production MCP fixes
   - Build command now installs Python deps (`pip install -r agent/requirements.txt && pip install -e ./aind-metadata-mcp`) before frontend build — ensures aind-metadata-mcp is available in production container
   - SDK pool warmup timeout increased from 30s → 60s (MCP startup takes ~33s in production due to MongoDB connection latency)

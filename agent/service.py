@@ -129,6 +129,12 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
     # lookups). Each built-in adds a few hundred tokens of tool schema to
     # every API turn for zero value. Read stays so the agent can inspect
     # uploaded files on disk if base64 isn't enough (rare edge case).
+    #
+    # permission_mode="bypassPermissions": the Claude Code CLI runs as a
+    # non-interactive subprocess with no TTY, so the default permission mode
+    # would block network requests with unanswerable approval prompts.
+    # bypassPermissions skips those prompts, letting MCP tool HTTP calls
+    # reach api.allenneuraldynamics.org and WebSearch calls go through.
     opts = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         allowed_tools=["Read", "WebSearch"] + capture_tools + aind_mcp_tools,
@@ -136,6 +142,7 @@ def _build_options(model: str | None = None) -> ClaudeAgentOptions:
         model=model if model in AVAILABLE_MODELS else DEFAULT_MODEL,
         mcp_servers=mcp_servers,
         include_partial_messages=True,
+        permission_mode="bypassPermissions",
     )
 
     return opts
@@ -654,7 +661,8 @@ async def chat(
     full_response: list[str] = []
 
     pool = get_pool()
-    use_pool = pool is not None and pool.is_warm and os.environ.get("USE_SDK_POOL", "0") == "1"
+    use_sdk_pool = os.environ.get("USE_SDK_POOL", "0") == "1"
+    use_pool = pool is not None and pool.is_warm and use_sdk_pool
     path = "pool" if use_pool else "query()"
     logger.info("Chat path=%s for session %s", path, session_id)
 
@@ -685,6 +693,17 @@ async def chat(
     assistant_text = "".join(full_response)
     logger.info("chat() post-stream: full_response has %d parts, %d chars total, session=%s",
                 len(full_response), len(assistant_text), session_id)
+
+    if use_pool and pool is not None:
+        _lower = assistant_text.lower()
+        _mcp_dead = (
+            "aind-data-mcp" in _lower
+            or ("mcp server" in _lower and ("reconnect" in _lower or "not available" in _lower or "fresh session" in _lower))
+        )
+        if _mcp_dead:
+            logger.warning("Detected MCP unavailability in agent response — forcing pool reconnect")
+            pool._needs_reconnect = True
+
     if assistant_text.strip():
         try:
             await save_conversation_turn(session_id, "assistant", assistant_text)
