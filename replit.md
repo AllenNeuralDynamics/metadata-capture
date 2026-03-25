@@ -131,6 +131,8 @@ workspace/
   - Single cleanup `finally` block handles all exit routes (break, exception, CancelledError) — no double-reset of `stream_events` token
   - `connect_failed` flag distinguishes "failed to connect" (60s retry) from "normal reconnect" (5s)
   - Shutdown via `None` sentinel still works; `cancel()` interrupts any sleep cleanly
+  - MCP-unavailability detection: `chat()` checks response text for "aind-data-mcp" / "MCP server" + "reconnect" / "not available"; if found, clears `_ready` to force immediate pool reconnect so the next query works
+  - Idle reconnect reduced from 30 min to 5 min as a safety net for silent MCP death
 
 - 2026-03-24: MCP cold-start improvements
   - Removed `nwb_tools` import from `data_access_server.py` — boto3 + hdmf_zarr were adding 20-40s of startup latency; those NWB tools are not in the allowed list anyway

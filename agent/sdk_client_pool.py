@@ -177,7 +177,7 @@ class SDKClientPool:
         """
         RECONNECT_DELAY_S = 5         # pause between reconnect cycles after failure
         CONNECT_RETRY_DELAY_S = 60    # pause before retrying a failed connect()
-        IDLE_RECONNECT_S = 1800.0     # proactively reconnect after 30 min idle
+        IDLE_RECONNECT_S = 300.0      # proactively reconnect after 5 min idle
 
         while True:
             opts = self._options_factory(None)

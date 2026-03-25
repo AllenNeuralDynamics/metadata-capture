@@ -693,6 +693,17 @@ async def chat(
     assistant_text = "".join(full_response)
     logger.info("chat() post-stream: full_response has %d parts, %d chars total, session=%s",
                 len(full_response), len(assistant_text), session_id)
+
+    if use_pool and pool is not None:
+        _lower = assistant_text.lower()
+        _mcp_dead = (
+            "aind-data-mcp" in _lower
+            or ("mcp server" in _lower and ("reconnect" in _lower or "not available" in _lower or "fresh session" in _lower))
+        )
+        if _mcp_dead:
+            logger.warning("Detected MCP unavailability in agent response — forcing pool reconnect")
+            pool._ready.clear()
+
     if assistant_text.strip():
         try:
             await save_conversation_turn(session_id, "assistant", assistant_text)
